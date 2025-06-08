@@ -244,10 +244,8 @@ async def scrape_product_listings(product_query: str, max_products_per_platform:
 
 async def run_product_pipeline(product_query: str = "iPhone 16", max_products_per_platform: int = 5, max_detail_pages: int = 10):
     """Main pipeline function that combines Crawl4AI listings with Firecrawl details"""
-    
+
     print(f"🚀 Step 1: Scraping product listings for '{product_query}'...")
-    
-    # Step 1: Get product listings using Crawl4AI
     listings = await scrape_product_listings(product_query, max_products_per_platform)
     
     if not listings:
@@ -298,13 +296,8 @@ def save_results_to_file(results: Dict, filename: str = "product_results.json"):
         json.dump(results, f, indent=2, ensure_ascii=False)
     print(f"💾 Results saved to {filename}")
 
-async def main():
+async def main(product_query: str = "iPhone 16", max_products_per_platform: int = 2, max_detail_pages: int = 4):
     """Main execution function"""
-    
-    # Configuration
-    product_query = "iPhone 16"
-    max_products_per_platform = 5
-    max_detail_pages = 10
     
     print("="*80)
     print("🛒 PRODUCT SCRAPING PIPELINE")
