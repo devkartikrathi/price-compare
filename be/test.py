@@ -12,12 +12,35 @@ from crewai import Agent, Task, Crew, Process
 from crewai.tools import BaseTool
 from crewai import LLM as CrewAILLM
 import traceback
+from firecrawl import FirecrawlApp
 
-# Logger setup
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 
 # Pydantic Models
+class ProductOffers(BaseModel):
+    """Schema for extracting product offers and discounts"""
+    credit_card_offers: List[str] = Field(default_factory=list, description="List of credit card specific offers")
+    bank_offers: List[str] = Field(default_factory=list, description="Bank specific discount offers")
+    cashback_offers: List[str] = Field(default_factory=list, description="Cashback offers available")
+    exchange_offers: List[str] = Field(default_factory=list, description="Exchange/trade-in offers")
+    coupon_offers: List[str] = Field(default_factory=list, description="Coupon codes and discounts")
+    emi_offers: List[str] = Field(default_factory=list, description="EMI and financing options")
+    special_discounts: List[str] = Field(default_factory=list, description="Special discounts and promotions")
+
+class ProductDetails(BaseModel):
+    """Schema for extracting detailed product information"""
+    title: str = Field(description="Product title/name")
+    price: str = Field(description="Current price of the product")
+    original_price: Optional[str] = Field(description="Original/MRP price if different from current price")
+    rating: Optional[str] = Field(description="Product rating")
+    seller: Optional[str] = Field(description="Seller/vendor name")
+    availability: Optional[str] = Field(description="Stock availability status")
+    delivery_info: Optional[str] = Field(description="Delivery information")
+    key_features: List[str] = Field(default_factory=list, description="Key product features")
+    specifications: Dict[str, str] = Field(default_factory=dict, description="Product specifications")
+    offers: ProductOffers = Field(default_factory=ProductOffers, description="All available offers")
+
 class BasicDetails(BaseModel):
     description_summary: Optional[str] = None
     key_features: List[str] = Field(default_factory=list)
@@ -36,6 +59,8 @@ class Product(BaseModel):
     original_price: Optional[float] = None
     effective_price: Optional[float] = None
     discount_applied: Optional[str] = None
+    offers_text: Optional[str] = None
+    detailed_offers: Optional[ProductOffers] = None
 
 class ProductOutput(BaseModel):
     title: str
@@ -48,7 +73,7 @@ class ProductOutput(BaseModel):
     rating: Optional[str] = None
     seller: Optional[str] = None
 
-# CSS Extraction Schemas
+# CSS Extraction Schemas for Listings (keeping original for Crawl4AI)
 amazon_css_listing_schema = {
     "name": "AmazonProductListing",
     "baseSelector": 'div[data-component-type="s-search-result"]',
@@ -82,7 +107,6 @@ browser_config = BrowserConfig(
     java_script_enabled=True,
 )
 
-# Crawl4AI Scraper Tool
 class Crawl4AIScraperTool(BaseTool):
     name: str = "Crawl4AIScraper"
     description: str = "Scrapes web pages using Crawl4AI with CSS or LLM extraction."
@@ -178,84 +202,12 @@ def safe_json_parse(json_str: str) -> Any:
         logger.warning(f"Could not parse JSON: {e}. Returning error dict.")
         return {"error": f"JSONDecodeError: {str(e)}"}
 
-# Fallback discount calculation (when LLM fails)
-def calculate_discount_fallback(products: List[Product], user_credit_cards: List[str]) -> List[Dict]:
-    """Fallback method to calculate discounts when LLM extraction fails"""
-    results = []
-    
-    for product in products:
-        original_price = product.original_price or parse_price(product.price)
-        if not original_price:
-            continue
-            
-        effective_price = original_price
-        discount_applied = "None"
-        
-        # Try to extract offers from basic_details if available
-        try:
-            if product.basic_details:
-                details = json.loads(product.basic_details)
-                offers = details.get('credit_card_offers', [])
-                
-                best_discount = 0
-                best_offer = None
-                
-                for offer in offers:
-                    # Check if any user card matches this offer
-                    for card in user_credit_cards:
-                        card_name = card.lower().replace(' ', '')
-                        if any(part in offer.lower() for part in card_name.split()):
-                            # Extract discount amount
-                            percentage_match = re.search(r'(\d+)%', offer)
-                            amount_match = re.search(r'₹(\d+)', offer)
-                            
-                            discount_value = 0
-                            if percentage_match:
-                                discount_value = float(percentage_match.group(1))
-                                calculated_discount = original_price * (discount_value / 100)
-                            elif amount_match:
-                                calculated_discount = float(amount_match.group(1))
-                                discount_value = (calculated_discount / original_price) * 100
-                            else:
-                                continue
-                                
-                            if calculated_discount > best_discount:
-                                best_discount = calculated_discount
-                                best_offer = offer
-                
-                if best_discount > 0:
-                    effective_price = original_price - best_discount
-                    discount_applied = best_offer
-                    
-        except Exception as e:
-            logger.warning(f"Error processing discount for {product.title}: {e}")
-        
-        results.append({
-            "title": product.title,
-            "platform": product.platform,
-            "price": product.price,
-            "original_price": original_price,
-            "effective_price": effective_price,
-            "discount_applied": discount_applied,
-            "url": product.url,
-            "rating": product.rating,
-            "seller": product.seller
-        })
-    
-    # Sort by effective price
-    results.sort(key=lambda x: x['effective_price'])
-    return results
-
-# Main Scraping Function
-async def scrape_products(product_query: str = "iPhone 15 128GB", user_credit_cards: List[str] = None, max_products_per_platform: int = 3, max_detail_pages: int = 6):
+async def scrape_products_enhanced(product_query: str = "iPhone 16", user_credit_cards: List[str] = None, max_products_per_platform: int = 5, max_detail_pages: int = 10):
+    """Enhanced scraping function with Firecrawl integration"""
     if user_credit_cards is None:
-        user_credit_cards = ["HDFC Bank", "Axis Bank", "SBI", "ICICI Bank"]
+        user_credit_cards = ["HDFC Bank", "Axis Bank Credit Card", "SBI Card", "ICICI Credit Card"]
 
     load_dotenv()
-    gemini_api_key = os.getenv("GEMINI_API_KEY")
-    if not gemini_api_key:
-        logger.error("GEMINI_API_KEY not found in environment variables.")
-        return []
 
     platforms = {
         "amazon": {
@@ -269,35 +221,6 @@ async def scrape_products(product_query: str = "iPhone 15 128GB", user_credit_ca
             "schema": flipkart_css_listing_schema
         },
     }
-
-    # Initialize LLM components with better error handling
-    llm_config_crawl4ai = None
-    llm_strategy_detail_page = None
-    
-    try:
-        llm_config_crawl4ai = LLMConfig(provider="gemini/gemini-2.0-flash-lite", api_token=gemini_api_key)
-        
-        llm_extraction_instruction = """
-        Extract credit card offers from this product page. Look for offers like:
-        - "X% off with [BANK NAME] card"
-        - "₹X off with [BANK NAME] credit card"
-        - "Additional discount on [BANK NAME] cards"
-        
-        Return JSON with: {"credit_card_offers": ["offer1", "offer2"], "seller_name": "seller"}
-        """
-        
-        llm_strategy_detail_page = LLMExtractionStrategy(
-            llm_config=llm_config_crawl4ai, 
-            schema=BasicDetails.model_json_schema(), 
-            extraction_type="schema",
-            instruction=llm_extraction_instruction, 
-            chunk_token_threshold=50000,  # Reduced to avoid quota issues
-            apply_chunking=True,
-            input_format="html", 
-            verbose=False
-        )
-    except Exception as e:
-        logger.warning(f"Failed to initialize LLM components: {e}. Will use fallback method.")
 
     initial_product_listings = []
     async with AsyncWebCrawler(config=browser_config) as crawler:
@@ -313,11 +236,11 @@ async def scrape_products(product_query: str = "iPhone 15 128GB", user_credit_ca
                 if isinstance(listings_data_parsed, dict) and "error" in listings_data_parsed:
                     logger.error(f"Failed to get listings from {platform_name}: {listings_data_parsed['error']}")
                     continue
-                    
+                
                 if not isinstance(listings_data_parsed, list):
                     logger.error(f"Expected list from {platform_name} listings, got {type(listings_data_parsed)}")
                     continue
-                    
+                
                 logger.info(f"Found {len(listings_data_parsed)} raw items from {platform_name}.")
                 
                 count = 0
@@ -326,7 +249,7 @@ async def scrape_products(product_query: str = "iPhone 15 128GB", user_credit_ca
                         break
                     if not isinstance(item_raw, dict):
                         continue
-                        
+                    
                     product_title = item_raw.get('title', "").strip()
                     full_url = None
                     
@@ -340,23 +263,23 @@ async def scrape_products(product_query: str = "iPhone 15 128GB", user_credit_ca
                             asin_match = re.search(r'/dp/([A-Z0-9]{10})', full_url)
                             if asin_match:
                                 final_asin = asin_match.group(1)
-                                
+                        
                         if direct_asin and (not final_asin or final_asin != direct_asin):
                             final_asin = str(direct_asin).strip() if not final_asin else final_asin
-                            
+                        
                         if final_asin:
                             full_url = f"{base_url}/dp/{final_asin.strip()}"
-                            
+                        
                         if not product_title:
                             product_title = f"Amazon Product ASIN: {final_asin}"
                     else:
                         scraped_url = item_raw.get('url')
                         if not product_title and not scraped_url:
                             continue
-                            
+                        
                         if not product_title:
                             product_title = f"{platform_name.capitalize()} Product (Title unknown)"
-                            
+                        
                         if scraped_url:
                             relative_url = str(scraped_url).strip()
                             full_url = (base_url + relative_url) if not relative_url.startswith(('http', '/')) else (base_url + relative_url if relative_url.startswith('/') else relative_url)
@@ -371,7 +294,7 @@ async def scrape_products(product_query: str = "iPhone 15 128GB", user_credit_ca
                         })
                         count += 1
                         logger.info(f"Added: {product_title[:60]}... from {platform_name}")
-                        
+            
             except Exception as e:
                 logger.error(f"Error scraping {platform_name}: {e}")
                 continue
@@ -380,171 +303,43 @@ async def scrape_products(product_query: str = "iPhone 15 128GB", user_credit_ca
         logger.warning("No initial product listings found")
         return []
 
-    all_products_for_analysis = []
-    
-    # Process detail pages with better error handling
     for listing_item in initial_product_listings[:min(len(initial_product_listings), max_detail_pages)]:
-        logger.info(f"Processing: {listing_item['title'][:60]}...")
-        
-        validated_basic_details = BasicDetails()
-        
-        # Try LLM extraction if available
-        if llm_strategy_detail_page:
-            try:
-                async with AsyncWebCrawler(config=browser_config) as detail_crawler:
-                    detail_scraper_tool = Crawl4AIScraperTool(crawler=detail_crawler, llm_strategy=llm_strategy_detail_page)
-                    detail_result_str = await detail_scraper_tool._arun(url=listing_item['url'], strategy_type="llm")
-                    parsed_llm_output = safe_json_parse(detail_result_str)
-                    
-                    actual_details_dict = {}
-                    if isinstance(parsed_llm_output, list) and parsed_llm_output and isinstance(parsed_llm_output[0], dict):
-                        actual_details_dict = parsed_llm_output[0]
-                    elif isinstance(parsed_llm_output, dict):
-                        actual_details_dict = parsed_llm_output
-                    
-                    if not (isinstance(actual_details_dict, dict) and actual_details_dict.get("error")):
-                        try:
-                            validated_basic_details = BasicDetails(**actual_details_dict)
-                            logger.info(f"Successfully extracted details for: {listing_item['title'][:60]}")
-                        except Exception as e_val:
-                            logger.warning(f"Pydantic validation failed for BasicDetails: {e_val}")
-                    else:
-                        logger.warning(f"LLM extraction error for {listing_item['url']}: {actual_details_dict.get('error')}")
-                        
-            except Exception as e:
-                logger.warning(f"Failed to extract details for {listing_item['url']}: {e}")
-        
-        all_products_for_analysis.append(Product(
-            title=listing_item['title'],
-            price=listing_item.get('price_str', 'N/A'),
-            rating=listing_item.get('rating_str'),
-            seller=validated_basic_details.seller_name,
-            url=listing_item['url'],
-            platform=listing_item['platform'],
-            basic_details=validated_basic_details.model_dump_json(),
-            original_price=parse_price(listing_item.get('price_str'))
-        ))
-        
-        # Add delay to avoid rate limits
-        await asyncio.sleep(3)
-
-    if not all_products_for_analysis:
-        logger.warning("No products processed for analysis")
-        return []
-
-    # Try CrewAI analysis, fallback to manual calculation
-    final_results = []
-    
-    try:
-        llm_crew = CrewAILLM(model="gemini/gemini-2.0-flash-lite", api_key=gemini_api_key, temperature=0.2)
-        processor_agent = Agent(
-            role="E-commerce Discount Analyzer",
-            goal="Analyze product data with user's credit card offers to find the best effective prices.",
-            backstory="Expert in parsing e-commerce product information and calculating discount prices.",
-            llm=llm_crew,
-            verbose=True,
-            allow_delegation=False
-        )
-        
-        all_products_input_str = json.dumps([p.model_dump(exclude_none=True) for p in all_products_for_analysis])
-        
-        discount_task = Task(
-            description=f"""
-            Analyze this product list: {all_products_input_str}
-            User's credit cards: {json.dumps(user_credit_cards)}
-            
-            Calculate effective prices considering credit card offers and return top 10 products sorted by effective price.
-            Return as JSON array with fields: title, platform, price, original_price, effective_price, discount_applied, url, rating, seller.
-            """,
-            agent=processor_agent,
-            expected_output="JSON array of products with discount analysis"  # Fixed: use string instead of class
-        )
-        
-        crew = Crew(agents=[processor_agent], tasks=[discount_task], verbose=True, process=Process.sequential)
-        logger.info(f"Starting CrewAI analysis with {len(all_products_for_analysis)} products.")
-        
-        result = crew.kickoff()
-        
-        # Try to parse CrewAI output
-        if hasattr(result, 'raw') and result.raw:
-            try:
-                final_results = json.loads(result.raw)
-                if not isinstance(final_results, list):
-                    raise ValueError("Expected list from CrewAI")
-                logger.info(f"CrewAI successfully processed {len(final_results)} products")
-            except Exception as e:
-                logger.warning(f"Failed to parse CrewAI output: {e}")
-                final_results = []
-        
-    except Exception as e:
-        logger.warning(f"CrewAI execution failed: {e}")
-        final_results = []
-
-    # Fallback to manual calculation if CrewAI fails
-    if not final_results:
-        logger.info("Using fallback discount calculation method")
-        final_results = calculate_discount_fallback(all_products_for_analysis, user_credit_cards)
-
-    # Display results
-    logger.info("=" * 50 + f"\nFINAL RESULTS for '{product_query}' (Top {min(len(final_results), 10)})\n" + "=" * 50)
-    
-    if final_results and isinstance(final_results, list):
-        for i, p in enumerate(final_results[:10], 1):
-            if isinstance(p, dict):
-                price_str = f"₹{p.get('effective_price'):,.2f}" if isinstance(p.get('effective_price'), (int, float)) else str(p.get('effective_price'))
-                logger.info(f"Product {i}: {p.get('title', 'N/A')[:60]} ({p.get('platform', 'N/A')})")
-                logger.info(f" Original: {p.get('price', 'N/A')} → Effective: {price_str}")
-                logger.info(f" Discount: {p.get('discount_applied', 'None')}")
-                logger.info(f" URL: {p.get('url', 'N/A')}")
-                logger.info("-" * 50)
-    else:
-        logger.warning("No final results available")
-
-    logger.info(f"Total results: {len(final_results) if isinstance(final_results, list) else 0}\n" + "=" * 50)
-    return final_results if isinstance(final_results, list) else []
-
-async def test_system():
-    load_dotenv()
-    product_query = "iPhone 15 128GB"
-    my_cards = ["HDFC Bank", "Axis Bank Credit Card", "SBI Card", "ICICI Credit Card"]
-    
-    logger.info(f"Testing system with query: '{product_query}', Cards: {my_cards}")
-    
-    try:
-        results = await scrape_products(
-            product_query, 
-            my_cards, 
-            max_products_per_platform=2, 
-            max_detail_pages=4
-        )
-        logger.info(f"Test completed. Processed {len(results)} products.")
-        return results
-    except Exception as e:
-        logger.error(f"Test system failed: {e}")
-        logger.error(traceback.format_exc())
-        return []
+        print(listing_item['url'], listing_item['platform'])
 
 if __name__ == "__main__":
-    final_test_results = asyncio.run(test_system())
-    
-    print("\n" + "="*60)
-    print("FINAL TEST RESULTS")
-    print("="*60)
-    
-    if final_test_results:
-        for i, product in enumerate(final_test_results[:5], 1):
-            eff_price = product.get('effective_price', 'N/A')
-            price_display = f"₹{eff_price:,.2f}" if isinstance(eff_price, (float, int)) else str(eff_price)
-            
-            print(f"\n{i}. {product.get('title', 'N/A')[:60]}")
-            print(f"   Platform: {product.get('platform', 'N/A')}")
-            print(f"   Original Price: {product.get('price', 'N/A')}")
-            print(f"   Effective Price: {price_display}")
-            print(f"   Discount: {product.get('discount_applied', 'None')}")
-            print(f"   Rating: {product.get('rating', 'N/A')}")
-            print(f"   URL: {product.get('url', 'N/A')[:80]}...")
-    else:
-        print("No products found or processed successfully.")
-    
-    print(f"\nTotal products processed: {len(final_test_results)}")
-    print("="*60) 
+    asyncio.run(scrape_products_enhanced())
+
+# 2025-06-07 21:13:39,618 - __main__ - INFO - Fetching listings from amazon: https://www.amazon.in/s?k=iPhone+16
+# 2025-06-07 21:13:39,619 - __main__ - INFO - Scraping https://www.amazon.in/s?k=iPhone+16 with strategy: css
+# [FETCH]... ↓ https://www.amazon.in/s?k=iPhone+16                                                                  | ✓ | ⏱: 2.05s 
+# [SCRAPE].. ◆ https://www.amazon.in/s?k=iPhone+16                                                                  | ✓ | ⏱: 0.57s 
+# [EXTRACT]. ■ Completed for https://www.amazon.in/s?k=iPhone+16... | Time: 0.3683638999937102s 
+# [COMPLETE] ● https://www.amazon.in/s?k=iPhone+16                                                                  | ✓ | ⏱: 3.00s 
+# 2025-06-07 21:13:42,645 - __main__ - INFO - Found 20 raw items from amazon.
+# 2025-06-07 21:13:42,645 - __main__ - INFO - Added: Amazon Product ASIN: B0DGJH8RYG... from amazon
+# 2025-06-07 21:13:42,645 - __main__ - INFO - Added: Amazon Product ASIN: B0DGHYDZR9... from amazon
+# 2025-06-07 21:13:42,645 - __main__ - INFO - Added: Amazon Product ASIN: B0DGHZWBYB... from amazon
+# 2025-06-07 21:13:42,645 - __main__ - INFO - Added: Amazon Product ASIN: B0DGJHBX5Y... from amazon
+# 2025-06-07 21:13:42,646 - __main__ - INFO - Added: Amazon Product ASIN: B0DGJC8DG8... from amazon
+# 2025-06-07 21:13:42,646 - __main__ - INFO - Fetching listings from flipkart: https://www.flipkart.com/search?q=iPhone%2016
+# 2025-06-07 21:13:42,647 - __main__ - INFO - Scraping https://www.flipkart.com/search?q=iPhone%2016 with strategy: css
+# [FETCH]... ↓ https://www.flipkart.com/search?q=iPhone 16                                                          | ✓ | ⏱: 1.47s 
+# [SCRAPE].. ◆ https://www.flipkart.com/search?q=iPhone 16                                                          | ✓ | ⏱: 0.20s 
+# [EXTRACT]. ■ Completed for https://www.flipkart.com/search?q=iPhone%2016... | Time: 0.805523999966681s 
+# [COMPLETE] ● https://www.flipkart.com/search?q=iPhone 16                                                          | ✓ | ⏱: 2.48s 
+# 2025-06-07 21:13:45,141 - __main__ - INFO - Found 51 raw items from flipkart.
+# 2025-06-07 21:13:45,141 - __main__ - INFO - Added: Apple iPhone 16 (Black, 128 GB)... from flipkart
+# 2025-06-07 21:13:45,142 - __main__ - INFO - Added: Apple iPhone 16 (Black, 128 GB)... from flipkart
+# 2025-06-07 21:13:45,142 - __main__ - INFO - Added: Apple iPhone 16 (Black, 128 GB)... from flipkart
+# 2025-06-07 21:13:45,142 - __main__ - INFO - Added: Apple iPhone 16 (Black, 128 GB)... from flipkart
+# 2025-06-07 21:13:45,142 - __main__ - INFO - Added: Apple iPhone 16 (Black, 256 GB)... from flipkart
+# https://www.amazon.in/dp/B0DGJH8RYG Amazon
+# https://www.amazon.in/dp/B0DGHYDZR9 Amazon
+# https://www.amazon.in/dp/B0DGHZWBYB Amazon
+# https://www.amazon.in/dp/B0DGJHBX5Y Amazon
+# https://www.amazon.in/dp/B0DGJC8DG8 Amazon
+# https://www.flipkart.com/apple-iphone-16-black-128-gb/p/itmb07d67f995271?pid=MOBH4DQFG8NKFRDY&lid=LSTMOBH4DQFG8NKFRDYNBDOZI&marketplace=FLIPKART&q=iPhone+16&store=tyy%2F4io&spotlightTagId=default_BestsellerId_tyy%2F4io&srno=s_1_1&otracker=search&fm=organic&iid=74a3ea84-8bc2-48dd-a5ce-7acf4a6b9fbb.MOBH4DQFG8NKFRDY.SEARCH&ppt=sp&ppn=sp&ssid=v4q0hv2yz40000001749311023735&qH=8e0ee2dac8c1afb1 Flipkart
+# https://www.flipkart.com/apple-iphone-16-black-128-gb/p/itmb07d67f995271?pid=MOBH4DQFG8NKFRDY&lid=LSTMOBH4DQFG8NKFRDYNBDOZI&marketplace=FLIPKART&q=iPhone+16&store=tyy%2F4io&spotlightTagId=default_BestsellerId_tyy%2F4io&srno=s_1_1&otracker=search&fm=organic&iid=74a3ea84-8bc2-48dd-a5ce-7acf4a6b9fbb.MOBH4DQFG8NKFRDY.SEARCH&ppt=sp&ppn=sp&ssid=v4q0hv2yz40000001749311023735&qH=8e0ee2dac8c1afb1 Flipkart
+# https://www.flipkart.com/apple-iphone-16-black-128-gb/p/itmb07d67f995271?pid=MOBH4DQFG8NKFRDY&lid=LSTMOBH4DQFG8NKFRDYNBDOZI&marketplace=FLIPKART&q=iPhone+16&store=tyy%2F4io&spotlightTagId=default_BestsellerId_tyy%2F4io&srno=s_1_1&otracker=search&fm=organic&iid=74a3ea84-8bc2-48dd-a5ce-7acf4a6b9fbb.MOBH4DQFG8NKFRDY.SEARCH&ppt=sp&ppn=sp&ssid=v4q0hv2yz40000001749311023735&qH=8e0ee2dac8c1afb1 Flipkart
+# https://www.flipkart.com/apple-iphone-16-black-128-gb/p/itmb07d67f995271?pid=MOBH4DQFG8NKFRDY&lid=LSTMOBH4DQFG8NKFRDYNBDOZI&marketplace=FLIPKART&q=iPhone+16&store=tyy%2F4io&spotlightTagId=default_BestsellerId_tyy%2F4io&srno=s_1_1&otracker=search&fm=organic&iid=74a3ea84-8bc2-48dd-a5ce-7acf4a6b9fbb.MOBH4DQFG8NKFRDY.SEARCH&ppt=sp&ppn=sp&ssid=v4q0hv2yz40000001749311023735&qH=8e0ee2dac8c1afb1 Flipkart
+# https://www.flipkart.com/apple-iphone-16-black-256-gb/p/itm86da1977dcdf1?pid=MOBH4DQFZCJJXUFG&lid=LSTMOBH4DQFZCJJXUFGO5DY3W&marketplace=FLIPKART&q=iPhone+16&store=tyy%2F4io&srno=s_1_2&otracker=search&fm=organic&iid=74a3ea84-8bc2-48dd-a5ce-7acf4a6b9fbb.MOBH4DQFZCJJXUFG.SEARCH&ppt=None&ppn=None&ssid=v4q0hv2yz40000001749311023735&qH=8e0ee2dac8c1afb1 Flipkart

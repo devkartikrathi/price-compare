@@ -1,667 +1,807 @@
-# import os
-# import asyncio
-# import json
-# import re
-# import logging
-# from pydantic import BaseModel, Field
-# from typing import List, Optional, Dict, Any
-# from dotenv import load_dotenv
-# from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig, CacheMode, LLMConfig
-# from crawl4ai.extraction_strategy import JsonCssExtractionStrategy, LLMExtractionStrategy
-# from crewai import Agent, Task, Crew, Process
-# from crewai.tools import BaseTool
-# from crewai import LLM as CrewAILLM
-# import traceback
-
-# # Logger setup
-# logger = logging.getLogger(__name__)
-# logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-
-# # Pydantic Models
-# class BasicDetails(BaseModel):
-#     description_summary: Optional[str] = None
-#     key_features: List[str] = Field(default_factory=list)
-#     variant_info: Optional[str] = None
-#     seller_name: Optional[str] = None
-#     credit_card_offers: List[str] = Field(default_factory=list)
-
-# class Product(BaseModel):
-#     title: str
-#     price: str
-#     rating: Optional[str] = None
-#     seller: Optional[str] = None
-#     url: str
-#     platform: str
-#     basic_details: Optional[str] = None
-#     original_price: Optional[float] = None
-#     effective_price: Optional[float] = None
-#     discount_applied: Optional[str] = None
-
-# class ProductOutput(BaseModel):
-#     title: str
-#     platform: str
-#     price: str
-#     original_price: float
-#     effective_price: float
-#     discount_applied: str
-#     url: str
-#     rating: Optional[str] = None
-#     seller: Optional[str] = None
-
-# # CSS Extraction Schemas
-# amazon_css_listing_schema = {
-#     "name": "AmazonProductListing",
-#     "baseSelector": 'div[data-component-type="s-search-result"]',
-#     "fields": [
-#         {"name": "title", "selector": "h2 a span.a-text-normal, span.a-size-medium.a-color-base.a-text-normal, span.a-size-base-plus.a-color-base.a-text-normal", "type": "text", "optional": True},
-#         {"name": "price", "selector": "span.a-price > span.a-offscreen, span.a-price-whole", "type": "text", "optional": True},
-#         {"name": "rating", "selector": "span.a-icon-alt", "type": "text", "optional": True},
-#         {"name": "url", "selector": 'h2 a.a-link-normal[href*="/dp/"], h2 a.s-link-style[href*="/dp/"], a.a-link-normal.s-underline-text[href*="/dp/"]', "type": "attribute", "attribute": "href", "optional": True},
-#         {"name": "asin_direct", "selector": "", "type": "attribute", "attribute": "data-asin", "optional": True},
-#     ]
-# }
-
-# flipkart_css_listing_schema = {
-#     "name": "FlipkartProductListing",
-#     "baseSelector": 'div[data-id], div._13oc-S, div.cPHDOP, div._1AtVbE, div.DOjaWF, div._4ddWXP',
-#     "fields": [
-#         {"name": "title", "selector": "._4rR01T, .s1Q9rs, .IRpwTa, .KzDlHZ, .wjcEIp, .VU-ZEz, .WKTcLC, ._2WkVRV, a.geBtmU, div._2WkVRV", "type": "text", "optional": True},
-#         {"name": "price", "selector": "._30jeq3, ._1_WHN1, .Nx9bqj, ._4b7s3u, div._30jeq3._1_WHN1", "type": "text", "optional": True},
-#         {"name": "rating", "selector": "._3LWZlK, ._1lRcqv, div._3LWZlK", "type": "text", "optional": True},
-#         {"name": "url", "selector": 'a[href*="/p/"], a[href*="/product/"], a._1fQZEK, a.s1Q9rs, a.IRpwTa, a._2UzuFa, a.geBtmU', "type": "attribute", "attribute": "href", "optional": False}
-#     ]
-# }
-
-# # Browser Configuration
-# browser_config = BrowserConfig(
-#     headless=True,
-#     viewport_width=1920,
-#     viewport_height=1080,
-#     verbose=False,
-#     user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-#     java_script_enabled=True,
-# )
-
-# # Crawl4AI Scraper Tool
-# class Crawl4AIScraperTool(BaseTool):
-#     name: str = "Crawl4AIScraper"
-#     description: str = "Scrapes web pages using Crawl4AI with CSS or LLM extraction."
-#     _crawler: AsyncWebCrawler
-#     _css_schema: Optional[Dict]
-#     _llm_strategy: Optional[LLMExtractionStrategy]
-
-#     def __init__(self, crawler: AsyncWebCrawler, css_schema: Optional[Dict] = None, llm_strategy: Optional[LLMExtractionStrategy] = None, **kwargs):
-#         super().__init__(**kwargs)
-#         self._crawler = crawler
-#         self._css_schema = css_schema
-#         self._llm_strategy = llm_strategy
-
-#     async def _arun(self, url: str, strategy_type: str = "css") -> str:
-#         if not self._crawler:
-#             logger.error("Crawler not initialized in Crawl4AIScraperTool.")
-#             return json.dumps({"error": "Crawler not initialized", "url": url})
-
-#         if not isinstance(url, str) or not url.startswith(('http://', 'https://')):
-#             logger.error(f"Invalid URL provided to Crawl4AIScraperTool: {url}")
-#             return json.dumps({"error": "Invalid URL format", "url": url})
-
-#         logger.info(f"Scraping {url} with strategy: {strategy_type}")
-#         try:
-#             if strategy_type == "css":
-#                 if not self._css_schema:
-#                     logger.error("CSS schema is required for css strategy but not provided.")
-#                     raise ValueError("CSS schema is required for css strategy")
-#                 crawl_config = CrawlerRunConfig(
-#                     extraction_strategy=JsonCssExtractionStrategy(self._css_schema, verbose=False),
-#                     cache_mode=CacheMode.BYPASS, wait_for="body", page_timeout=30000
-#                 )
-#             elif strategy_type == "llm":
-#                 if not self._llm_strategy:
-#                     logger.error("LLM strategy is required for llm strategy but not provided.")
-#                     raise ValueError("LLM strategy is required for llm strategy")
-#                 crawl_config = CrawlerRunConfig(
-#                     extraction_strategy=self._llm_strategy,
-#                     cache_mode=CacheMode.BYPASS, session_id="detail_page_session",
-#                     wait_for="body", page_timeout=45000
-#                 )
-#             else:
-#                 raise ValueError(f"Invalid strategy_type: {strategy_type}")
-
-#             result = await self._crawler.arun(url=url, config=crawl_config)
-#             if result.success:
-#                 logger.debug(f"Successfully scraped {url}. Extracted content type: {type(result.extracted_content)}")
-#                 if isinstance(result.extracted_content, (dict, list)):
-#                     return json.dumps(result.extracted_content)
-#                 return str(result.extracted_content)
-#             else:
-#                 logger.error(f"Scraping failed for {url}: {result.error_message} (Status: {result.status_code})")
-#                 return json.dumps({"error": result.error_message, "url": url, "status_code": result.status_code})
-#         except Exception as e:
-#             logger.error(f"Error in Crawl4AIScraperTool for {url} (strategy: {strategy_type}): {str(e)}")
-#             logger.error(traceback.format_exc())
-#             return json.dumps({"error": str(e), "url": url})
-
-#     def _run(self, url: str, strategy_type: str = "css") -> str:
-#         try:
-#             loop = asyncio.get_event_loop()
-#             if loop.is_running():
-#                 future = asyncio.ensure_future(self._arun(url, strategy_type))
-#                 result = loop.run_until_complete(future)
-#             else:
-#                 result = asyncio.run(self._arun(url, strategy_type))
-#             return result
-#         except Exception as e:
-#             logger.error(f"Error in Crawl4AIScraperTool sync _run for {url}: {str(e)}")
-#             return json.dumps({"error": str(e), "url": url})
-
-# # Helper Functions
-# def parse_price(price_str: Any) -> Optional[float]:
-#     if not price_str:
-#         return None
-#     try:
-#         clean_price = re.sub(r'[₹,]', '', str(price_str))
-#         price_match = re.search(r'(\d+\.?\d*)', clean_price)
-#         if price_match:
-#             return float(price_match.group(1))
-#         return None
-#     except (ValueError, AttributeError, TypeError) as e:
-#         logger.warning(f"Could not parse price: '{price_str}'. Error: {e}")
-#         return None
-
-# def safe_json_parse(json_str: str) -> Any:
-#     if not isinstance(json_str, str):
-#         logger.warning(f"safe_json_parse expected a string, got {type(json_str)}. Returning error dict.")
-#         return {"error": f"Invalid input type to safe_json_parse: {type(json_str)}"}
-#     try:
-#         return json.loads(json_str)
-#     except json.JSONDecodeError as e:
-#         logger.warning(f"Could not parse JSON: {e}. Returning error dict.")
-#         return {"error": f"JSONDecodeError: {str(e)}"}
-
-# # Fallback discount calculation (when LLM fails)
-# def calculate_discount_fallback(products: List[Product], user_credit_cards: List[str]) -> List[Dict]:
-#     """Fallback method to calculate discounts when LLM extraction fails"""
-#     results = []
-    
-#     for product in products:
-#         original_price = product.original_price or parse_price(product.price)
-#         if not original_price:
-#             continue
-            
-#         effective_price = original_price
-#         discount_applied = "None"
-        
-#         # Try to extract offers from basic_details if available
-#         try:
-#             if product.basic_details:
-#                 details = json.loads(product.basic_details)
-#                 offers = details.get('credit_card_offers', [])
-                
-#                 best_discount = 0
-#                 best_offer = None
-                
-#                 for offer in offers:
-#                     # Check if any user card matches this offer
-#                     for card in user_credit_cards:
-#                         card_name = card.lower().replace(' ', '')
-#                         if any(part in offer.lower() for part in card_name.split()):
-#                             # Extract discount amount
-#                             percentage_match = re.search(r'(\d+)%', offer)
-#                             amount_match = re.search(r'₹(\d+)', offer)
-                            
-#                             discount_value = 0
-#                             if percentage_match:
-#                                 discount_value = float(percentage_match.group(1))
-#                                 calculated_discount = original_price * (discount_value / 100)
-#                             elif amount_match:
-#                                 calculated_discount = float(amount_match.group(1))
-#                                 discount_value = (calculated_discount / original_price) * 100
-#                             else:
-#                                 continue
-                                
-#                             if calculated_discount > best_discount:
-#                                 best_discount = calculated_discount
-#                                 best_offer = offer
-                
-#                 if best_discount > 0:
-#                     effective_price = original_price - best_discount
-#                     discount_applied = best_offer
-                    
-#         except Exception as e:
-#             logger.warning(f"Error processing discount for {product.title}: {e}")
-        
-#         results.append({
-#             "title": product.title,
-#             "platform": product.platform,
-#             "price": product.price,
-#             "original_price": original_price,
-#             "effective_price": effective_price,
-#             "discount_applied": discount_applied,
-#             "url": product.url,
-#             "rating": product.rating,
-#             "seller": product.seller
-#         })
-    
-#     # Sort by effective price
-#     results.sort(key=lambda x: x['effective_price'])
-#     return results
-
-# # Main Scraping Function
-# async def scrape_products(product_query: str = "iPhone 15 128GB", user_credit_cards: List[str] = None, max_products_per_platform: int = 3, max_detail_pages: int = 6):
-#     if user_credit_cards is None:
-#         user_credit_cards = ["HDFC Bank", "Axis Bank Credit Card", "SBI Card", "ICICI Credit Card"]
-
-#     load_dotenv()
-#     gemini_api_key = os.getenv("GEMINI_API_KEY")
-#     anthropic_api_key = os.getenv("ANTHROPIC_API_KEY")
-#     openai_api_key = os.getenv("OPENAI_API_KEY")
-#     if not gemini_api_key:
-#         logger.error("GEMINI_API_KEY not found in environment variables.")
-#         return []
-#     if not anthropic_api_key:
-#         logger.error("ANTHROPIC_API_KEY not found in environment variables.")
-#         return []
-#     if not openai_api_key:
-#         logger.error("OPENAI_API_KEY not found in environment variables.")
-#         return []
-
-#     platforms = {
-#         "amazon": {
-#             "search_url": f"https://www.amazon.in/s?k={product_query.replace(' ', '+')}",
-#             "base_url": "https://www.amazon.in",
-#             "schema": amazon_css_listing_schema
-#         },
-#         "flipkart": {
-#             "search_url": f"https://www.flipkart.com/search?q={product_query.replace(' ', '%20')}",
-#             "base_url": "https://www.flipkart.com",
-#             "schema": flipkart_css_listing_schema
-#         },
-#     }
-
-#     # Initialize LLM components with better error handling
-#     llm_config_crawl4ai = None
-#     llm_strategy_detail_page = None
-    
-#     try:
-#         llm_config_crawl4ai = LLMConfig(provider="gemini/gemini-2.0-flash-lite", api_token=gemini_api_key)
-        
-#         llm_extraction_instruction = """
-#         Extract credit card offers from this product page. Look for offers like:
-#         - "X% off with [BANK NAME] card"
-#         - "₹X off with [BANK NAME] credit card"
-#         - "Additional discount on [BANK NAME] cards"
-        
-#         Return JSON with: {"credit_card_offers": ["offer1", "offer2"], "seller_name": "seller"}
-#         """
-        
-#         llm_strategy_detail_page = LLMExtractionStrategy(
-#             llm_config=llm_config_crawl4ai,     
-#             schema=BasicDetails.model_json_schema(), 
-#             extraction_type="schema",
-#             instruction=llm_extraction_instruction, 
-#             chunk_token_threshold=50000, 
-#             apply_chunking=True,
-#             input_format="html", 
-#             verbose=False
-#         )
-#     except Exception as e:
-#         logger.warning(f"Failed to initialize LLM components: {e}. Will use fallback method.")
-
-#     initial_product_listings = []
-#     async with AsyncWebCrawler(config=browser_config) as crawler:
-#         for platform_name, info in platforms.items():
-#             search_url, base_url, schema = info['search_url'], info['base_url'], info['schema']
-#             css_scraper_tool = Crawl4AIScraperTool(crawler=crawler, css_schema=schema)
-#             logger.info(f"Fetching listings from {platform_name}: {search_url}")
-            
-#             try:
-#                 raw_listing_data_str = await css_scraper_tool._arun(url=search_url, strategy_type="css")
-#                 listings_data_parsed = safe_json_parse(raw_listing_data_str)
-                
-#                 if isinstance(listings_data_parsed, dict) and "error" in listings_data_parsed:
-#                     logger.error(f"Failed to get listings from {platform_name}: {listings_data_parsed['error']}")
-#                     continue
-                    
-#                 if not isinstance(listings_data_parsed, list):
-#                     logger.error(f"Expected list from {platform_name} listings, got {type(listings_data_parsed)}")
-#                     continue
-                    
-#                 logger.info(f"Found {len(listings_data_parsed)} raw items from {platform_name}.")
-                
-#                 count = 0
-#                 for item_raw in listings_data_parsed:
-#                     if count >= max_products_per_platform:
-#                         break
-#                     if not isinstance(item_raw, dict):
-#                         continue
-                        
-#                     product_title = item_raw.get('title', "").strip()
-#                     full_url = None
-                    
-#                     if platform_name == "amazon":
-#                         scraped_url_path, direct_asin = item_raw.get('url'), item_raw.get('asin_direct')
-#                         final_asin = None
-                        
-#                         if scraped_url_path:
-#                             relative_url = str(scraped_url_path).strip()
-#                             full_url = (base_url + relative_url) if not relative_url.startswith(('http', '/')) else (base_url + relative_url if relative_url.startswith('/') else relative_url)
-#                             asin_match = re.search(r'/dp/([A-Z0-9]{10})', full_url)
-#                             if asin_match:
-#                                 final_asin = asin_match.group(1)
-                                
-#                         if direct_asin and (not final_asin or final_asin != direct_asin):
-#                             final_asin = str(direct_asin).strip() if not final_asin else final_asin
-                            
-#                         if final_asin:
-#                             full_url = f"{base_url}/dp/{final_asin.strip()}"
-                            
-#                         if not product_title:
-#                             product_title = f"Amazon Product ASIN: {final_asin}"
-#                     else:
-#                         scraped_url = item_raw.get('url')
-#                         if not product_title and not scraped_url:
-#                             continue
-                            
-#                         if not product_title:
-#                             product_title = f"{platform_name.capitalize()} Product (Title unknown)"
-                            
-#                         if scraped_url:
-#                             relative_url = str(scraped_url).strip()
-#                             full_url = (base_url + relative_url) if not relative_url.startswith(('http', '/')) else (base_url + relative_url if relative_url.startswith('/') else relative_url)
-                    
-#                     if full_url and product_title:
-#                         initial_product_listings.append({
-#                             'title': product_title,
-#                             'price_str': item_raw.get('price', ''),
-#                             'rating_str': item_raw.get('rating'),
-#                             'url': full_url,
-#                             'platform': platform_name.capitalize()
-#                         })
-#                         count += 1
-#                         logger.info(f"Added: {product_title[:60]}... from {platform_name}")
-                        
-#             except Exception as e:
-#                 logger.error(f"Error scraping {platform_name}: {e}")
-#                 continue
-
-#     if not initial_product_listings:
-#         logger.warning("No initial product listings found")
-#         return []
-
-#     all_products_for_analysis = []
-    
-#     # Process detail pages with better error handling
-#     for listing_item in initial_product_listings[:min(len(initial_product_listings), max_detail_pages)]:
-#         logger.info(f"Processing: {listing_item['title'][:60]}...")
-        
-#         validated_basic_details = BasicDetails()
-        
-#         # Try LLM extraction if available
-#         if llm_strategy_detail_page:
-#             try:
-#                 async with AsyncWebCrawler(config=browser_config) as detail_crawler:
-#                     detail_scraper_tool = Crawl4AIScraperTool(crawler=detail_crawler, llm_strategy=llm_strategy_detail_page)
-#                     detail_result_str = await detail_scraper_tool._arun(url=listing_item['url'], strategy_type="llm")
-#                     logger.info(f"LLM extraction result: {detail_result_str}")
-#                     parsed_llm_output = safe_json_parse(detail_result_str)
-                    
-#                     actual_details_dict = {}
-#                     if isinstance(parsed_llm_output, list) and parsed_llm_output and isinstance(parsed_llm_output[0], dict):
-#                         actual_details_dict = parsed_llm_output[0]
-#                     elif isinstance(parsed_llm_output, dict):
-#                         actual_details_dict = parsed_llm_output
-                    
-#                     if not (isinstance(actual_details_dict, dict) and actual_details_dict.get("error")):
-#                         try:
-#                             validated_basic_details = BasicDetails(**actual_details_dict)
-#                             logger.info(f"Successfully extracted details for: {listing_item['title'][:60]}")
-#                         except Exception as e_val:
-#                             logger.warning(f"Pydantic validation failed for BasicDetails: {e_val}")
-#                     else:
-#                         logger.warning(f"LLM extraction error for {listing_item['url']}: {actual_details_dict.get('error')}")
-                        
-#             except Exception as e:
-#                 logger.warning(f"Failed to extract details for {listing_item['url']}: {e}")
-        
-#         all_products_for_analysis.append(Product(
-#             title=listing_item['title'],
-#             price=listing_item.get('price_str', 'N/A'),
-#             rating=listing_item.get('rating_str'),
-#             seller=validated_basic_details.seller_name,
-#             url=listing_item['url'],
-#             platform=listing_item['platform'],
-#             basic_details=validated_basic_details.model_dump_json(),
-#             original_price=parse_price(listing_item.get('price_str'))
-#         ))
-        
-#         # Add delay to avoid rate limits
-#         await asyncio.sleep(10)
-
-#     if not all_products_for_analysis:
-#         logger.warning("No products processed for analysis")
-#         return []
-
-#     # Try CrewAI analysis, fallback to manual calculation
-#     final_results = []
-    
-#     try:
-#         llm_crew = CrewAILLM(model="gemini/gemini-2.0-flash-lite", api_key=gemini_api_key, temperature=0.1)
-#         # llm_crew = CrewAILLM(model="anthropic/claude-3-sonnet", api_key=anthropic_api_key, temperature=0.1)
-#         processor_agent = Agent(
-#             role="E-commerce Discount Analyzer",
-#             goal="Analyze product data with user's credit card offers to find the best effective prices.",
-#             backstory="Expert in parsing e-commerce product information and calculating discount prices.",
-#             llm=llm_crew,
-#             verbose=True,
-#             allow_delegation=False
-#         )
-        
-#         all_products_input_str = json.dumps([p.model_dump(exclude_none=True) for p in all_products_for_analysis])
-        
-#         discount_task = Task(
-#             description=f"""
-#             Analyze this product list: {all_products_input_str}
-#             User's credit cards: {json.dumps(user_credit_cards)}
-            
-#             Calculate effective prices considering credit card offers and return top 10 products sorted by effective price.
-#             Return as JSON array with fields: title, platform, price, original_price, effective_price, discount_applied, url, rating, seller.
-#             """,
-#             agent=processor_agent,
-#             expected_output="JSON array of products with discount analysis"
-#         )
-        
-#         crew = Crew(agents=[processor_agent], tasks=[discount_task], verbose=True, process=Process.sequential)
-#         logger.info(f"Starting CrewAI analysis with {len(all_products_for_analysis)} products.")
-        
-#         result = crew.kickoff()
-        
-#         # Try to parse CrewAI output
-#         if hasattr(result, 'raw') and result.raw:
-#             try:
-#                 final_results = json.loads(result.raw)
-#                 if not isinstance(final_results, list):
-#                     raise ValueError("Expected list from CrewAI")
-#                 logger.info(f"CrewAI successfully processed {len(final_results)} products")
-#             except Exception as e:
-#                 logger.warning(f"Failed to parse CrewAI output: {e}")
-#                 final_results = []
-        
-#     except Exception as e:
-#         logger.warning(f"CrewAI execution failed: {e}")
-#         final_results = []
-
-#     # Fallback to manual calculation if CrewAI fails
-#     if not final_results:
-#         logger.info("Using fallback discount calculation method")
-#         final_results = calculate_discount_fallback(all_products_for_analysis, user_credit_cards)
-
-#     # Display results
-#     logger.info("=" * 50 + f"\nFINAL RESULTS for '{product_query}' (Top {min(len(final_results), 10)})\n" + "=" * 50)
-    
-#     if final_results and isinstance(final_results, list):
-#         for i, p in enumerate(final_results[:10], 1):
-#             if isinstance(p, dict):
-#                 price_str = f"₹{p.get('effective_price'):,.2f}" if isinstance(p.get('effective_price'), (int, float)) else str(p.get('effective_price'))
-#                 logger.info(f"Product {i}: {p.get('title', 'N/A')[:60]} ({p.get('platform', 'N/A')})")
-#                 logger.info(f" Original: {p.get('price', 'N/A')} → Effective: {price_str}")
-#                 logger.info(f" Discount: {p.get('discount_applied', 'None')}")
-#                 logger.info(f" URL: {p.get('url', 'N/A')}")
-#                 logger.info("-" * 50)
-#     else:
-#         logger.warning("No final results available")
-
-#     logger.info(f"Total results: {len(final_results) if isinstance(final_results, list) else 0}\n" + "=" * 50)
-#     return final_results if isinstance(final_results, list) else []
-
-# async def test_system():
-#     load_dotenv()
-#     product_query = "iPhone 15 128GB"
-#     my_cards = ["HDFC Bank", "Axis Bank Credit Card", "SBI Card", "ICICI Credit Card", "Flipkart Axis Bank Credit Card"]
-    
-#     logger.info(f"Testing system with query: '{product_query}', Cards: {my_cards}")
-    
-#     try:
-#         results = await scrape_products(
-#             product_query, 
-#             my_cards, 
-#             max_products_per_platform=2, 
-#             max_detail_pages=4
-#         )
-#         logger.info(f"Test completed. Processed {len(results)} products.")
-#         return results
-#     except Exception as e:
-#         logger.error(f"Test system failed: {e}")
-#         logger.error(traceback.format_exc())
-#         return []
-
-# if __name__ == "__main__":
-#     final_test_results = asyncio.run(test_system())
-    
-#     print("\n" + "="*60)
-#     print("FINAL TEST RESULTS")
-#     print("="*60)
-    
-#     if final_test_results:
-#         for i, product in enumerate(final_test_results[:5], 1):
-#             eff_price = product.get('effective_price', 'N/A')
-#             price_display = f"₹{eff_price:,.2f}" if isinstance(eff_price, (float, int)) else str(eff_price)
-            
-#             print(f"\n{i}. {product.get('title', 'N/A')[:60]}")
-#             print(f"   Platform: {product.get('platform', 'N/A')}")
-#             print(f"   Original Price: {product.get('price', 'N/A')}")
-#             print(f"   Effective Price: {price_display}")
-#             print(f"   Discount: {product.get('discount_applied', 'None')}")
-#             print(f"   Rating: {product.get('rating', 'N/A')}")
-#             print(f"   URL: {product.get('url', 'N/A')[:80]}...")
-#     else:
-#         print("No products found or processed successfully.")
-    
-#     print(f"\nTotal products processed: {len(final_test_results)}")
-#     print("="*60)
-
-# main.py
-
+import os
 import asyncio
-import traceback
-from urllib.parse import quote
+import json
+import re
+from pydantic import BaseModel, Field
+from typing import List, Optional, Dict, Any
+from dotenv import load_dotenv
+from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig, CacheMode
+from crawl4ai.extraction_strategy import JsonCssExtractionStrategy
+from firecrawl import FirecrawlApp
 
-from crawl4ai import AsyncWebCrawler, LLMConfig, LLMExtractionStrategy
+# Load environment variables
+load_dotenv()
 
-import config
-import utils
-from models import Product, BasicDetails
-from scraping import fetch_product_listings, fetch_product_details
-from analysis import analyze_discounts_with_crewai, calculate_discount_fallback
+# Pydantic Models
+class AmazonProduct(BaseModel):
+    product_title: str = Field(description="The title of the product")
+    price: str = Field(description="The current price of the product, including currency")
+    offers: list[str] = Field(description="List of current offers on the product, including bank credit card offers")
+    brand: str = Field(description="The brand of the product")
+    asin: str = Field(description="The Amazon Standard Identification Number")
 
-logger = utils.setup_logging()
+class FlipkartProduct(BaseModel):
+    product_title: str = Field(description="The title of the product")
+    price: str = Field(description="The current price of the product, including currency")
+    original_price: str = Field(description="The original price before discount, if available", default="")
+    discount: str = Field(description="The discount percentage or amount, if available", default="")
+    offers: list[str] = Field(description="List of current offers on the product, including bank offers and exchange offers")
+    brand: str = Field(description="The brand of the product")
+    rating: str = Field(description="The product rating out of 5", default="")
+    reviews_count: str = Field(description="Number of reviews/ratings", default="")
 
-async def run_product_search_pipeline(
-    product_query: str, 
-    user_credit_cards: list = None, 
-    max_listings: int = config.MAX_PRODUCTS_PER_PLATFORM,
-    max_details: int = config.MAX_DETAIL_PAGES_TO_SCRAPE
-):
-    """Orchestrates the end-to-end product search and analysis pipeline."""
-    user_credit_cards = user_credit_cards or config.DEFAULT_USER_CARDS
+# Updated CSS Extraction Schemas with better selectors
+amazon_css_listing_schema = {
+    "name": "AmazonProductListing",
+    "baseSelector": 'div[data-component-type="s-search-result"], div[data-asin]',
+    "fields": [
+        {"name": "title", "selector": "h2 a span, .a-size-medium.a-color-base, .a-size-base-plus, h2 span", "type": "text", "optional": True},
+        {"name": "price", "selector": ".a-price .a-offscreen, .a-price-whole", "type": "text", "optional": True},
+        {"name": "rating", "selector": ".a-icon-alt", "type": "text", "optional": True},
+        {"name": "url", "selector": 'h2 a[href*="/dp/"], a[href*="/dp/"]', "type": "attribute", "attribute": "href", "optional": True},
+        {"name": "asin_direct", "selector": "", "type": "attribute", "attribute": "data-asin", "optional": True},
+    ]
+}
+
+flipkart_css_listing_schema = {
+    "name": "FlipkartProductListing",
+    "baseSelector": 'div[data-id], div._13oc-S, div.cPHDOP, div._1AtVbE, div.DOjaWF, div._4ddWXP',
+    "fields": [
+        {"name": "title", "selector": "._4rR01T, .s1Q9rs, .IRpwTa, .KzDlHZ, .wjcEIp, .VU-ZEz, .WKTcLC, ._2WkVRV, a.geBtmU, div._2WkVRV", "type": "text", "optional": True},
+        {"name": "price", "selector": "._30jeq3, ._1_WHN1, .Nx9bqj, ._4b7s3u, div._30jeq3._1_WHN1", "type": "text", "optional": True},
+        {"name": "rating", "selector": "._3LWZlK, ._1lRcqv, div._3LWZlK", "type": "text", "optional": True},
+        {"name": "url", "selector": 'a[href*="/p/"], a[href*="/product/"], a._1fQZEK, a.s1Q9rs, a.IRpwTa, a._2UzuFa, a.geBtmU', "type": "attribute", "attribute": "href", "optional": False}
+    ]
+}
+
+# Browser Configuration
+browser_config = BrowserConfig(
+    headless=True,
+    viewport_width=1920,
+    viewport_height=1080,
+    verbose=True,  # Enable verbose logging
+    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    java_script_enabled=True,
+)
+
+def detect_platform(url: str) -> str:
+    """Detect whether the URL is from Amazon or Flipkart"""
+    if "amazon." in url.lower():
+        return "amazon"
+    elif "flipkart." in url.lower():
+        return "flipkart"
+    else:
+        return "unknown"
+
+def scrape_product_details(url: str) -> Dict:
+    """Scrape detailed product information from a product URL using Firecrawl"""
+    try:
+        print(f"🔍 Scraping details for: {url[:80]}...")
+        
+        api_key = os.getenv("FIRECRAWL_API_KEY")
+        if not api_key:
+            print("❌ FIRECRAWL_API_KEY not set")
+            return {"error": "FIRECRAWL_API_KEY not set", "url": url}
+        
+        app = FirecrawlApp(api_key=api_key)
+        platform = detect_platform(url)
+        
+        print(f"📱 Platform detected: {platform}")
+        
+        if platform == "amazon":
+            result = app.scrape_url(
+                url,
+                formats=['json'],
+                jsonOptions={'schema': AmazonProduct.model_json_schema()}
+            )
+        elif platform == "flipkart":
+            result = app.scrape_url(
+                url,
+                formats=['json'],
+                jsonOptions={'schema': FlipkartProduct.model_json_schema()}
+            )
+        else:
+            print(f"❌ Unsupported platform: {platform}")
+            return {"error": "Unsupported platform", "url": url}
+        
+        # Extract JSON data from result
+        if hasattr(result, 'json') and result.json:
+            print(f"✅ Successfully scraped {platform} product details")
+            return {"platform": platform, "url": url, "data": result.json}
+        elif isinstance(result, dict) and 'json' in result and result['json']:
+            print(f"✅ Successfully scraped {platform} product details")
+            return {"platform": platform, "url": url, "data": result['json']}
+        else:
+            print(f"❌ Failed to extract product data from {platform}")
+            return {"error": "Failed to extract product data", "url": url}
     
-    try:
-        api_keys = utils.load_api_keys()
-    except ValueError as e:
-        logger.error(e)
-        return []
-
-    # --- 1. Initialize LLM Strategy for Detail Pages ---
-    llm_strategy_detail_page = None
-    try:
-        llm_config = LLMConfig(provider="gemini/gemini-2.0-flash-lite", api_token=api_keys["gemini"])
-        llm_strategy_detail_page = LLMExtractionStrategy(
-            llm_config=llm_config,
-            schema=BasicDetails.model_json_schema(),
-            extraction_type="schema",
-            instruction=config.LLM_EXTRACTION_INSTRUCTION,
-            apply_chunking=True,
-            chunk_token_threshold=50000,
-        )
     except Exception as e:
-        logger.warning(f"Failed to initialize LLM strategy: {e}. Detail extraction will be limited.")
+        print(f"❌ Exception while scraping {url}: {str(e)}")
+        return {"error": str(e), "url": url}
 
-    # --- 2. Scrape Initial Product Listings ---
-    initial_listings = []
-    async with AsyncWebCrawler(config=config.BROWSER_CONFIG) as crawler:
-        listing_tasks = [
-            fetch_product_listings(crawler, name, info, quote(product_query), max_listings)
-            for name, info in config.PLATFORMS.items()
-        ]
-        results = await asyncio.gather(*listing_tasks)
-        for res in results:
-            initial_listings.extend(res)
+async def scrape_product_listings(product_query: str, max_products_per_platform: int = 5) -> List[Dict]:
+    """Scrape product listings from Amazon and Flipkart using Crawl4AI"""
+    platforms = {
+        "amazon": {
+            "search_url": f"https://www.amazon.in/s?k={product_query.replace(' ', '+')}&ref=nb_sb_noss",
+            "base_url": "https://www.amazon.in",
+            "schema": amazon_css_listing_schema
+        },
+        "flipkart": {
+            "search_url": f"https://www.flipkart.com/search?q={product_query.replace(' ', '%20')}",
+            "base_url": "https://www.flipkart.com",
+            "schema": flipkart_css_listing_schema
+        },
+    }
 
-    if not initial_listings:
-        logger.warning("No product listings found across any platform.")
-        return []
-
-    # --- 3. Scrape Product Detail Pages ---
-    products_for_analysis = []
-    detail_pages_to_scrape = initial_listings[:min(len(initial_listings), max_details)]
+    listings = []
+    processed_urls = set()  # Track processed URLs to avoid duplicates
     
-    async with AsyncWebCrawler(config=config.BROWSER_CONFIG) as detail_crawler:
-        for listing in detail_pages_to_scrape:
-            details = await fetch_product_details(detail_crawler, listing.url, llm_strategy_detail_page)
+    async with AsyncWebCrawler(config=browser_config) as crawler:
+        for platform_name, info in platforms.items():
+            try:
+                print(f"\n🌐 Starting to scrape {platform_name.upper()}...")
+                print(f"🔗 URL: {info['search_url']}")
+                
+                crawl_config = CrawlerRunConfig(
+                    extraction_strategy=JsonCssExtractionStrategy(info['schema'], verbose=False),
+                    cache_mode=CacheMode.BYPASS,
+                    wait_for="body",
+                    page_timeout=30000,
+                    js_code="""
+                    // Wait for content to load and scroll a bit
+                    await new Promise(resolve => setTimeout(resolve, 3000));
+                    window.scrollTo(0, 500);
+                    await new Promise(resolve => setTimeout(resolve, 1000));
+                    """
+                )
+                
+                result = await crawler.arun(url=info['search_url'], config=crawl_config)
+                
+                if result.success and result.extracted_content:
+                    print(f"✅ {platform_name} page loaded successfully")
+                    
+                    try:
+                        raw_data = json.loads(result.extracted_content) if isinstance(result.extracted_content, str) else result.extracted_content
+                        print(f"📊 Raw data extracted from {platform_name}: {len(raw_data)} items")
+                        
+                        # Debug: Print first item structure
+                        if raw_data:
+                            print(f"🔍 Sample item from {platform_name}: {raw_data[0]}")
+                        
+                        count = 0
+                        for item in raw_data:
+                            if count >= max_products_per_platform:
+                                break
+                            
+                            title = item.get('title', '').strip()
+                            if not title:
+                                print(f"⚠️  Skipping item with no title: {item}")
+                                continue
+                            
+                            # Process URL
+                            url = item.get('url', '')
+                            if platform_name == "amazon":
+                                if not url.startswith('http'):
+                                    url = info['base_url'] + url
+                                asin_match = re.search(r'/dp/([A-Z0-9]{10})', url)
+                                if asin_match:
+                                    url = f"{info['base_url']}/dp/{asin_match.group(1)}"
+                                else:
+                                    # Try to get ASIN from the item
+                                    asin = item.get('asin_direct', '')
+                                    if asin:
+                                        url = f"{info['base_url']}/dp/{asin}"
+                                    else:
+                                        print(f"⚠️  No valid Amazon URL/ASIN for: {title}")
+                                        continue
+                            else:  # flipkart
+                                if not url.startswith('http'):
+                                    url = info['base_url'] + url
+                            
+                            # Check for duplicates
+                            if url in processed_urls:
+                                print(f"⚠️  Skipping duplicate URL: {url}")
+                                continue
+                            
+                            processed_urls.add(url)
+                            
+                            listing_item = {
+                                'title': title,
+                                'price_str': item.get('price', ''),
+                                'rating_str': item.get('rating'),
+                                'url': url,
+                                'platform': platform_name.capitalize()
+                            }
+                            
+                            listings.append(listing_item)
+                            count += 1
+                            print(f"✅ Added {platform_name} product #{count}: {title[:50]}...")
+                    
+                    except json.JSONDecodeError as e:
+                        print(f"❌ JSON decode error for {platform_name}: {e}")
+                        print(f"Raw content preview: {str(result.extracted_content)[:200]}")
+                
+                else:
+                    print(f"❌ Failed to scrape {platform_name}")
+                    if hasattr(result, 'error_message'):
+                        print(f"Error message: {result.error_message}")
             
-            products_for_analysis.append(Product(
-                title=listing.title,
-                price=listing.price_str,
-                rating=listing.rating_str,
-                seller=details.seller_name,
-                url=listing.url,
-                platform=listing.platform,
-                basic_details=details.model_dump_json(),
-                original_price=utils.parse_price(listing.price_str)
-            ))
-            await asyncio.sleep(2) # Be a good citizen
-
-    # --- 4. Analyze Data and Calculate Discounts ---
-    final_results = analyze_discounts_with_crewai(products_for_analysis, user_credit_cards, api_keys["gemini"])
+            except Exception as e:
+                print(f"❌ Exception while scraping {platform_name}: {e}")
+                import traceback
+                traceback.print_exc()
+                continue
     
-    if not final_results:
-        logger.info("CrewAI analysis failed or returned no results. Using fallback calculation.")
-        final_results = calculate_discount_fallback(products_for_analysis, user_credit_cards)
-
-    # --- 5. Display Results ---
-    utils.display_final_results(final_results, product_query)
+    print(f"\n📈 SCRAPING SUMMARY:")
+    amazon_count = len([l for l in listings if l['platform'] == 'Amazon'])
+    flipkart_count = len([l for l in listings if l['platform'] == 'Flipkart'])
+    print(f"   Amazon products found: {amazon_count}")
+    print(f"   Flipkart products found: {flipkart_count}")
+    print(f"   Total unique listings: {len(listings)}")
     
-    return final_results
+    return listings
 
+async def run_product_pipeline(product_query: str = "iPhone 16", max_products_per_platform: int = 5, max_detail_pages: int = 10):
+    """Main pipeline function that combines Crawl4AI listings with Firecrawl details"""
+    
+    print(f"🚀 Step 1: Scraping product listings for '{product_query}'...")
+    
+    # Step 1: Get product listings using Crawl4AI
+    listings = await scrape_product_listings(product_query, max_products_per_platform)
+    
+    if not listings:
+        print("❌ No product listings found")
+        return {"error": "No product listings found"}
+    
+    print(f"\n✅ Found {len(listings)} product listings total")
+    
+    # Step 2: Get detailed information for each product using Firecrawl
+    print(f"\n🚀 Step 2: Scraping detailed information for up to {max_detail_pages} products...")
+    
+    detailed_products = []
+    processed_count = 0
+    
+    for i, listing in enumerate(listings):
+        if processed_count >= max_detail_pages:
+            break
+        
+        print(f"\n📦 Processing product {processed_count + 1}/{min(len(listings), max_detail_pages)}")
+        print(f"   Platform: {listing['platform']}")
+        print(f"   Title: {listing['title'][:60]}...")
+        
+        # Get detailed product information
+        detail_result = scrape_product_details(listing['url'])
+        
+        # Combine listing and detail information
+        combined_product = {
+            "listing_info": listing,
+            "detailed_info": detail_result
+        }
+        
+        detailed_products.append(combined_product)
+        processed_count += 1
+    
+    # Step 3: Return final JSON with all product information
+    final_result = {
+        "query": product_query,
+        "total_listings_found": len(listings),
+        "detailed_products_processed": len(detailed_products),
+        "products": detailed_products
+    }
+    
+    return final_result
+
+def save_results_to_file(results: Dict, filename: str = "product_results.json"):
+    """Save results to a JSON file"""
+    with open(filename, 'w', encoding='utf-8') as f:
+        json.dump(results, f, indent=2, ensure_ascii=False)
+    print(f"💾 Results saved to {filename}")
+
+async def main():
+    """Main execution function"""
+    
+    # Configuration
+    product_query = "iPhone 16"
+    max_products_per_platform = 5
+    max_detail_pages = 10
+    
+    print("="*80)
+    print("🛒 PRODUCT SCRAPING PIPELINE")
+    print("="*80)
+    print(f"🔍 Query: {product_query}")
+    print(f"📊 Max products per platform: {max_products_per_platform}")
+    print(f"🔍 Max detail pages: {max_detail_pages}")
+    print("="*80)
+    
+    # Run the pipeline
+    results = await run_product_pipeline(
+        product_query=product_query,
+        max_products_per_platform=max_products_per_platform,
+        max_detail_pages=max_detail_pages
+    )
+    
+    # Print results summary
+    print("\n" + "="*80)
+    print("📊 FINAL RESULTS SUMMARY")
+    print("="*80)
+    
+    if "products" in results:
+        amazon_products = [p for p in results["products"] if p["listing_info"]["platform"] == "Amazon"]
+        flipkart_products = [p for p in results["products"] if p["listing_info"]["platform"] == "Flipkart"]
+        
+        print(f"🛒 Amazon products: {len(amazon_products)}")
+        print(f"🛒 Flipkart products: {len(flipkart_products)}")
+        print(f"🛒 Total products: {len(results['products'])}")
+        
+        # Show sample of each platform
+        if amazon_products:
+            print(f"\n📱 Sample Amazon product:")
+            sample = amazon_products[0]
+            print(f"   Title: {sample['listing_info']['title']}")
+            print(f"   Price: {sample['listing_info']['price_str']}")
+            if 'data' in sample['detailed_info']:
+                print(f"   Detailed scraped: ✅")
+            else:
+                print(f"   Detailed scraped: ❌ ({sample['detailed_info'].get('error', 'Unknown error')})")
+        
+        if flipkart_products:
+            print(f"\n📱 Sample Flipkart product:")
+            sample = flipkart_products[0]
+            print(f"   Title: {sample['listing_info']['title']}")
+            print(f"   Price: {sample['listing_info']['price_str']}")
+            if 'data' in sample['detailed_info']:
+                print(f"   Detailed scraped: ✅")
+            else:
+                print(f"   Detailed scraped: ❌ ({sample['detailed_info'].get('error', 'Unknown error')})")
+    
+    print("\n" + "="*80)
+    print("📋 FULL RESULTS (JSON)")
+    print("="*80)
+    print(json.dumps(results, indent=2, ensure_ascii=False))
+    
+    # Save to file
+    save_results_to_file(results)
+    
+    return results
 
 if __name__ == "__main__":
-    product_to_find = "iPhone 16"
-    my_cards = ["HDFC Bank", "Axis Bank", "Flipkart Axis Bank Credit Card"]
+    asyncio.run(main())
     
-    logger.info(f"Starting product search for: '{product_to_find}'")
-    
-    try:
-        final_data = asyncio.run(run_product_search_pipeline(product_to_find, my_cards))
-        logger.info(f"Pipeline finished. Found and processed {len(final_data)} products.")
-    except Exception as e:
-        logger.error(f"An unhandled error occurred in the main pipeline: {e}")
-        logger.error(traceback.format_exc())
+# ================================================================================
+# 🛒 PRODUCT SCRAPING PIPELINE
+# ================================================================================
+# 🔍 Query: iPhone 16
+# 📊 Max products per platform: 5
+# 🔍 Max detail pages: 10
+# ================================================================================
+# 🚀 Step 1: Scraping product listings for 'iPhone 16'...
+# [INIT].... → Crawl4AI 0.6.3
+
+# 🌐 Starting to scrape AMAZON...
+# 🔗 URL: https://www.amazon.in/s?k=iPhone+16&ref=nb_sb_noss
+# [FETCH]... ↓ https://www.amazon.in/s?k=iPhone+16&ref=nb_sb_noss                                                   | ✓ | ⏱: 6.06s 
+# [SCRAPE].. ◆ https://www.amazon.in/s?k=iPhone+16&ref=nb_sb_noss                                                   | ✓ | ⏱: 0.62s 
+# [EXTRACT]. ■ Completed for https://www.amazon.in/s?k=iPhone+16&ref=nb_sb_noss... | Time: 0.6427810000022873s 
+# [COMPLETE] ● https://www.amazon.in/s?k=iPhone+16&ref=nb_sb_noss                                                   | ✓ | ⏱: 7.33s 
+# ✅ amazon page loaded successfully
+# 📊 Raw data extracted from amazon: 30 items
+# 🔍 Sample item from amazon: {'rating': '4.4 out of 5 stars.'}
+# ⚠️  Skipping item with no title: {'rating': '4.4 out of 5 stars.'}
+# ⚠️  Skipping item with no title: {'rating': '4.4 out of 5 stars.'}
+# ⚠️  Skipping item with no title: {'rating': '4.4 out of 5 stars.'}
+# ⚠️  Skipping item with no title: {'rating': '4.4 out of 5 stars.'}
+# ⚠️  No valid Amazon URL/ASIN for: iPhone 16 128 GB: 5G Mobile Phone with Camera Control, A18 Chip and a Big Boost in Battery Life. Works with AirPods; Black
+# ⚠️  No valid Amazon URL/ASIN for: iPhone 16 Pro 128 GB: 5G Mobile Phone with Camera Control, 4K 120 fps Dolby Vision and a Huge Leap in Battery Life. Works with AirPods; Natural Titanium
+# ✅ Added amazon product #1: iPhone 16 128 GB: 5G Mobile Phone with Camera Cont...
+# ✅ Added amazon product #2: iPhone 16 Pro Max 256 GB: 5G Mobile Phone with Cam...
+# ✅ Added amazon product #3: iPhone 16 128 GB: 5G Mobile Phone with Camera Cont...
+# ⚠️  No valid Amazon URL/ASIN for: iPhone 16e 128 GB: Built for Apple Intelligence, A18 Chip, Supersized Battery Life, 48MP Fusion. Camera, 15.40 cm (6.1″) Super Retina XDR Display; Blaack
+# ⚠️  No valid Amazon URL/ASIN for: iPhone 16e 128 GB: Built for Apple Intelligence, A18 Chip, Supersized Battery Life, 48MP Fusion. Camera, 15.40 cm (6.1″) Super Retina XDR Display; Blaack
+# ⚠️  No valid Amazon URL/ASIN for: Apple iPhone 15 (128 GB) - Blue
+# ⚠️  No valid Amazon URL/ASIN for: iPhone 16 Pro 128 GB: 5G Mobile Phone with Camera Control, 4K 120 fps Dolby Vision and a Huge Leap in Battery Life. Works with AirPods; Natural Titaniium
+# ⚠️  No valid Amazon URL/ASIN for: iPhone 16 Pro Max 256 GB: 5G Mobile Phone with Camera Control, 4K 120 fps Dolby Vision and a Huge Leap in Battery Life. Works with AirPods; Desert Tittanium
+# ⚠️  No valid Amazon URL/ASIN for: iPhone 16 512 GB: 5G Mobile Phone with Camera Control, A18 Chip and a Big Boost in Battery Life. Works with AirPods; Ultramarine
+# ✅ Added amazon product #4: iPhone 16 128 GB: 5G Mobile Phone with Camera Cont...
+# ✅ Added amazon product #5: iPhone 16 Pro 256 GB: 5G Mobile Phone with Camera ...
+
+# 🌐 Starting to scrape FLIPKART...
+# 🔗 URL: https://www.flipkart.com/search?q=iPhone%2016
+# [FETCH]... ↓ https://www.flipkart.com/search?q=iPhone 16                                                          | ✓ | ⏱: 5.53s 
+# [SCRAPE].. ◆ https://www.flipkart.com/search?q=iPhone 16                                                          | ✓ | ⏱: 0.18s 
+# [EXTRACT]. ■ Completed for https://www.flipkart.com/search?q=iPhone%2016... | Time: 0.7851784999947995s 
+# [COMPLETE] ● https://www.flipkart.com/search?q=iPhone 16                                                          | ✓ | ⏱: 6.51s 
+# ✅ flipkart page loaded successfully
+# 📊 Raw data extracted from flipkart: 51 items
+# 🔍 Sample item from flipkart: {'title': 'Apple iPhone 16 (Black, 128 GB)', 'price': '₹74,900', 'url': '/apple-iphone-16-black-128-gb/p/itmb07d67f995271?pid=MOBH4DQFG8NKFRDY&lid=LSTMOBH4DQFG8NKFRDYNBDOZI&marketplace=FLIPKART&q=iPhone+16&store=tyy%2F4io&spotlightTagId=default_BestsellerId_tyy%2F4io&srno=s_1_1&otracker=search&fm=organic&iid=c111715d-0551-4030-9e77-e494ad176729.MOBH4DQFG8NKFRDY.SEARCH&ppt=sp&ppn=sp&ssid=l3f0en9g8g0000001749372704906&qH=8e0ee2dac8c1afb1'}
+# ✅ Added flipkart product #1: Apple iPhone 16 (Black, 128 GB)...
+# ⚠️  Skipping duplicate URL: https://www.flipkart.com/apple-iphone-16-black-128-gb/p/itmb07d67f995271?pid=MOBH4DQFG8NKFRDY&lid=LSTMOBH4DQFG8NKFRDYNBDOZI&marketplace=FLIPKART&q=iPhone+166&store=tyy%2F4io&spotlightTagId=default_BestsellerId_tyy%2F4io&srno=s_1_1&otracker=search&fm=organic&iid=c111715d-0551-4030-9e77-e494ad176729.MOBH4DQFG8NKFRDY.SEARCH&ppt=sp&ppn=sp&ssid=l3f0en9g8g0000001749372704906&qH=8e0ee2dac8c1afb1
+# ⚠️  Skipping duplicate URL: https://www.flipkart.com/apple-iphone-16-black-128-gb/p/itmb07d67f995271?pid=MOBH4DQFG8NKFRDY&lid=LSTMOBH4DQFG8NKFRDYNBDOZI&marketplace=FLIPKART&q=iPhone+166&store=tyy%2F4io&spotlightTagId=default_BestsellerId_tyy%2F4io&srno=s_1_1&otracker=search&fm=organic&iid=c111715d-0551-4030-9e77-e494ad176729.MOBH4DQFG8NKFRDY.SEARCH&ppt=sp&ppn=sp&ssid=l3f0en9g8g0000001749372704906&qH=8e0ee2dac8c1afb1
+# ⚠️  Skipping duplicate URL: https://www.flipkart.com/apple-iphone-16-black-128-gb/p/itmb07d67f995271?pid=MOBH4DQFG8NKFRDY&lid=LSTMOBH4DQFG8NKFRDYNBDOZI&marketplace=FLIPKART&q=iPhone+166&store=tyy%2F4io&spotlightTagId=default_BestsellerId_tyy%2F4io&srno=s_1_1&otracker=search&fm=organic&iid=c111715d-0551-4030-9e77-e494ad176729.MOBH4DQFG8NKFRDY.SEARCH&ppt=sp&ppn=sp&ssid=l3f0en9g8g0000001749372704906&qH=8e0ee2dac8c1afb1
+# ✅ Added flipkart product #2: Apple iPhone 16 (Pink, 256 GB)...
+# ⚠️  Skipping duplicate URL: https://www.flipkart.com/apple-iphone-16-pink-256-gb/p/itm0d8c695cded44?pid=MOBH4DQF28XAYM2S&lid=LSTMOBH4DQF28XAYM2S3JPA23&marketplace=FLIPKART&q=iPhone+16&&store=tyy%2F4io&srno=s_1_2&otracker=search&fm=organic&iid=c111715d-0551-4030-9e77-e494ad176729.MOBH4DQF28XAYM2S.SEARCH&ppt=None&ppn=None&ssid=l3f0en9g8g0000001749372704906&qH=8e0ee2dac8c1afb1
+# ✅ Added flipkart product #3: Apple iPhone 16 (Black, 256 GB)...
+# ⚠️  Skipping duplicate URL: https://www.flipkart.com/apple-iphone-16-black-256-gb/p/itm86da1977dcdf1?pid=MOBH4DQFZCJJXUFG&lid=LSTMOBH4DQFZCJJXUFGO5DY3W&marketplace=FLIPKART&q=iPhone+166&store=tyy%2F4io&srno=s_1_3&otracker=search&fm=organic&iid=c111715d-0551-4030-9e77-e494ad176729.MOBH4DQFZCJJXUFG.SEARCH&ppt=None&ppn=None&ssid=l3f0en9g8g0000001749372704906&qH=8e0ee2dac8c1afb1
+# ✅ Added flipkart product #4: Apple iPhone 16 (Teal, 128 GB)...
+# ⚠️  Skipping duplicate URL: https://www.flipkart.com/apple-iphone-16-teal-128-gb/p/itmce4bb3f55cc2f?pid=MOBH4DQFSY9ETDUU&lid=LSTMOBH4DQFSY9ETDUUI6AN3O&marketplace=FLIPKART&q=iPhone+16&&store=tyy%2F4io&srno=s_1_4&otracker=search&fm=organic&iid=c111715d-0551-4030-9e77-e494ad176729.MOBH4DQFSY9ETDUU.SEARCH&ppt=None&ppn=None&ssid=l3f0en9g8g0000001749372704906&qH=8e0ee2dac8c1afb1
+# ✅ Added flipkart product #5: Apple iPhone 16 (White, 128 GB)...
+
+# 📈 SCRAPING SUMMARY:
+#    Amazon products found: 5
+#    Flipkart products found: 5
+#    Total unique listings: 10
+
+# ✅ Found 10 product listings total
+
+# 🚀 Step 2: Scraping detailed information for up to 10 products...
+
+# 📦 Processing product 1/10
+#    Platform: Amazon
+#    Title: iPhone 16 128 GB: 5G Mobile Phone with Camera Control, A18 C...
+# 🔍 Scraping details for: https://www.amazon.in/dp/B0DGJH8RYG...
+# 📱 Platform detected: amazon
+# ✅ Successfully scraped amazon product details
+
+# 📦 Processing product 2/10
+#    Platform: Amazon
+#    Title: iPhone 16 Pro Max 256 GB: 5G Mobile Phone with Camera Contro...
+# 🔍 Scraping details for: https://www.amazon.in/dp/B0DGHYDZR9...
+# 📱 Platform detected: amazon
+# ✅ Successfully scraped amazon product details
+
+# 📦 Processing product 3/10
+#    Platform: Amazon
+#    Title: iPhone 16 128 GB: 5G Mobile Phone with Camera Control, A18 C...
+# 🔍 Scraping details for: https://www.amazon.in/dp/B0DGHZWBYB...
+# 📱 Platform detected: amazon
+# ✅ Successfully scraped amazon product details
+
+# 📦 Processing product 4/10
+#    Platform: Amazon
+#    Title: iPhone 16 128 GB: 5G Mobile Phone with Camera Control, A18 C...
+# 🔍 Scraping details for: https://www.amazon.in/dp/B0DGJHBX5Y...
+# 📱 Platform detected: amazon
+# ✅ Successfully scraped amazon product details
+
+# 📦 Processing product 5/10
+#    Platform: Amazon
+#    Title: iPhone 16 Pro 256 GB: 5G Mobile Phone with Camera Control, 4...
+# 🔍 Scraping details for: https://www.amazon.in/dp/B0DGJC8DG8...
+# 📱 Platform detected: amazon
+# ✅ Successfully scraped amazon product details
+
+# 📦 Processing product 6/10
+#    Platform: Flipkart
+#    Title: Apple iPhone 16 (Black, 128 GB)...
+# 🔍 Scraping details for: https://www.flipkart.com/apple-iphone-16-black-128-gb/p/itmb07d67f995271?pid=MOB...
+# 📱 Platform detected: flipkart
+# ✅ Successfully scraped flipkart product details
+
+# 📦 Processing product 7/10
+#    Platform: Flipkart
+#    Title: Apple iPhone 16 (Pink, 256 GB)...
+# 🔍 Scraping details for: https://www.flipkart.com/apple-iphone-16-pink-256-gb/p/itm0d8c695cded44?pid=MOBH...
+# 📱 Platform detected: flipkart
+# ✅ Successfully scraped flipkart product details
+
+# 📦 Processing product 8/10
+#    Platform: Flipkart
+#    Title: Apple iPhone 16 (Black, 256 GB)...
+# 🔍 Scraping details for: https://www.flipkart.com/apple-iphone-16-black-256-gb/p/itm86da1977dcdf1?pid=MOB...
+# 📱 Platform detected: flipkart
+# ✅ Successfully scraped flipkart product details
+
+# 📦 Processing product 9/10
+#    Platform: Flipkart
+#    Title: Apple iPhone 16 (Teal, 128 GB)...
+# 🔍 Scraping details for: https://www.flipkart.com/apple-iphone-16-teal-128-gb/p/itmce4bb3f55cc2f?pid=MOBH...
+# 📱 Platform detected: flipkart
+# ✅ Successfully scraped flipkart product details
+
+# 📦 Processing product 10/10
+#    Platform: Flipkart
+#    Title: Apple iPhone 16 (White, 128 GB)...
+# 🔍 Scraping details for: https://www.flipkart.com/apple-iphone-16-white-128-gb/p/itm7c0281cd247be?pid=MOB...
+# 📱 Platform detected: flipkart
+# ✅ Successfully scraped flipkart product details
+
+# ================================================================================
+# 📊 FINAL RESULTS SUMMARY
+# ================================================================================
+# 🛒 Amazon products: 5
+# 🛒 Flipkart products: 5
+# 🛒 Total products: 10
+
+# 📱 Sample Amazon product:
+#    Title: iPhone 16 128 GB: 5G Mobile Phone with Camera Control, A18 Chip and a Big Boost in Battery Life. Works with AirPods; Teal
+#    Price: ₹73,500
+#    Detailed scraped: ✅
+
+# 📱 Sample Flipkart product:
+#    Title: Apple iPhone 16 (Black, 128 GB)
+#    Price: ₹74,900
+#    Detailed scraped: ✅
+
+# ================================================================================
+# 📋 FULL RESULTS (JSON)
+# ================================================================================
+# {
+#   "query": "iPhone 16",
+#   "total_listings_found": 10,
+#   "detailed_products_processed": 10,
+#   "products": [
+#     {
+#       "listing_info": {
+#         "title": "iPhone 16 128 GB: 5G Mobile Phone with Camera Control, A18 Chip and a Big Boost in Battery Life. Works with AirPods; Teal",
+#         "price_str": "₹73,500",
+#         "rating_str": "4.4 out of 5 stars",
+#         "url": "https://www.amazon.in/dp/B0DGJH8RYG",
+#         "platform": "Amazon"
+#       },
+#       "detailed_info": {
+#         "platform": "amazon",
+#         "url": "https://www.amazon.in/dp/B0DGJH8RYG",
+#         "data": {
+#           "product_title": "iPhone 16 128 GB: 5G Mobile Phone with Camera Control, A18 Chip and a Big Boost in Battery Life. Works with AirPods; Teal",
+#           "price": "₹73,500.00",
+#           "offers": [
+#             "Upto ₹4,000.00 discount on select Credit Cards",
+#             "Upto ₹3,311.61 EMI interest savings on select Credit Cards",
+#             "Upto ₹2,205.00 cashback as Amazon Pay Balance when you pay with Amazon Pay ICICI Bank Credit Cards",
+#             "Get GST invoice and save up to 28% on business purchases."
+#           ],
+#           "brand": "Apple",
+#           "asin": "B0DGJH8RYG"
+#         }
+#       }
+#     },
+#     {
+#       "listing_info": {
+#         "title": "iPhone 16 Pro Max 256 GB: 5G Mobile Phone with Camera Control, 4K 120 fps Dolby Vision and a Huge Leap in Battery Life. Works with AirPods; Desert Titanium",
+#         "price_str": "₹1,35,900",
+#         "rating_str": "4.3 out of 5 stars",
+#         "url": "https://www.amazon.in/dp/B0DGHYDZR9",
+#         "platform": "Amazon"
+#       },
+#       "detailed_info": {
+#         "platform": "amazon",
+#         "url": "https://www.amazon.in/dp/B0DGHYDZR9",
+#         "data": {
+#           "product_title": "iPhone 16 Pro Max 256 GB: 5G Mobile Phone with Camera Control, 4K 120 fps Dolby Vision and a Huge Leap in Battery Life. Works with AirPods; Desert Titanium",
+#           "price": "₹1,35,900.00",
+#           "offers": [
+#             "Upto ₹6,123.10 EMI interest savings on select Credit Cards",
+#             "Upto ₹3,000.00 discount on select Credit Cards",
+#             "Upto ₹4,077.00 cashback as Amazon Pay Balance when you pay with Amazon Pay ICICI Bank Credit Cards",
+#             "Get GST invoice and save up to 28% on business purchases."
+#           ],
+#           "brand": "Apple",
+#           "asin": "B0DGHYDZR9"
+#         }
+#       }
+#     },
+#     {
+#       "listing_info": {
+#         "title": "iPhone 16 128 GB: 5G Mobile Phone with Camera Control, A18 Chip and a Big Boost in Battery Life. Works with AirPods; White",
+#         "price_str": "₹73,500",
+#         "rating_str": "4.4 out of 5 stars",
+#         "url": "https://www.amazon.in/dp/B0DGHZWBYB",
+#         "platform": "Amazon"
+#       },
+#       "detailed_info": {
+#         "platform": "amazon",
+#         "url": "https://www.amazon.in/dp/B0DGHZWBYB",
+#         "data": {
+#           "product_title": "iPhone 16 128 GB: 5G Mobile Phone with Camera Control, A18 Chip and a Big Boost in Battery Life. Works with AirPods; White",
+#           "price": "₹73,500.00",
+#           "offers": [
+#             "Upto ₹4,000.00 discount on select Credit Cards",
+#             "Upto ₹3,311.61 EMI interest savings on select Credit Cards",
+#             "Upto ₹2,205.00 cashback as Amazon Pay Balance when you pay with Amazon Pay ICICI Bank Credit Cards",
+#             "Get GST invoice and save up to 28% on business purchases."
+#           ],
+#           "brand": "Apple",
+#           "asin": "B0DGHZWBYB"
+#         }
+#       }
+#     },
+#     {
+#       "listing_info": {
+#         "title": "iPhone 16 128 GB: 5G Mobile Phone with Camera Control, A18 Chip and a Big Boost in Battery Life. Works with AirPods; Black",
+#         "price_str": "₹73,500",
+#         "rating_str": "4.4 out of 5 stars",
+#         "url": "https://www.amazon.in/dp/B0DGJHBX5Y",
+#         "platform": "Amazon"
+#       },
+#       "detailed_info": {
+#         "platform": "amazon",
+#         "url": "https://www.amazon.in/dp/B0DGJHBX5Y",
+#         "data": {
+#           "product_title": "iPhone 16 128 GB: 5G Mobile Phone with Camera Control, A18 Chip and a Big Boost in Battery Life. Works with AirPods; Black",
+#           "price": "₹73,500.00",
+#           "offers": [
+#             "Upto ₹4,000.00 discount on select Credit Cards",
+#             "Upto ₹3,311.61 EMI interest savings on select Credit Cards",
+#             "Upto ₹2,205.00 cashback as Amazon Pay Balance when you pay with Amazon Pay ICICI Bank Credit Cards",
+#             "Get GST invoice and save up to 28% on business purchases."
+#           ],
+#           "brand": "Apple",
+#           "asin": "B0DGJHBX5Y"
+#         }
+#       }
+#     },
+#     {
+#       "listing_info": {
+#         "title": "iPhone 16 Pro 256 GB: 5G Mobile Phone with Camera Control, 4K 120 fps Dolby Vision and a Huge Leap in Battery Life. Works with AirPods; Black Titanium",
+#         "price_str": "₹1,22,900",
+#         "rating_str": "4.4 out of 5 stars",
+#         "url": "https://www.amazon.in/dp/B0DGJC8DG8",
+#         "platform": "Amazon"
+#       },
+#       "detailed_info": {
+#         "platform": "amazon",
+#         "url": "https://www.amazon.in/dp/B0DGJC8DG8",
+#         "data": {
+#           "product_title": "iPhone 16 Pro 256 GB: 5G Mobile Phone with Camera Control, 4K 120 fps Dolby Vision and a Huge Leap in Battery Life. Works with AirPods; Black Titanium",    
+#           "price": "₹1,22,900.00",
+#           "offers": [
+#             "Upto ₹3,000.00 discount on select Credit Cards",
+#             "Upto ₹5,537.39 EMI interest savings on select Credit Cards",
+#             "Upto ₹3,687.00 cashback as Amazon Pay Balance when you pay with Amazon Pay ICICI Bank Credit Cards",
+#             "Get GST invoice and save up to 28% on business purchases."
+#           ],
+#           "brand": "Apple",
+#           "asin": "B0DGJC8DG8"
+#         }
+#       }
+#     },
+#     {
+#       "listing_info": {
+#         "title": "Apple iPhone 16 (Black, 128 GB)",
+#         "price_str": "₹74,900",
+#         "rating_str": null,
+#         "url": "https://www.flipkart.com/apple-iphone-16-black-128-gb/p/itmb07d67f995271?pid=MOBH4DQFG8NKFRDY&lid=LSTMOBH4DQFG8NKFRDYNBDOZI&marketplace=FLIPKART&q=iPhone+16&store=tyy%2F4io&spotlightTagId=default_BestsellerId_tyy%2F4io&srno=s_1_1&otracker=search&fm=organic&iid=c111715d-0551-4030-9e77-e494ad176729.MOBH4DQFG8NKFRDY.SEARCH&ppt=sp&ppn=sp&ssid=l3f0en9g8g0000001749372704906&qH=8e0ee2dac8c1afb1",
+#         "platform": "Flipkart"
+#       },
+#       "detailed_info": {
+#         "platform": "flipkart",
+#         "url": "https://www.flipkart.com/apple-iphone-16-black-128-gb/p/itmb07d67f995271?pid=MOBH4DQFG8NKFRDY&lid=LSTMOBH4DQFG8NKFRDYNBDOZI&marketplace=FLIPKART&q=iPhone+16&store=tyy%2F4io&spotlightTagId=default_BestsellerId_tyy%2F4io&srno=s_1_1&otracker=search&fm=organic&iid=c111715d-0551-4030-9e77-e494ad176729.MOBH4DQFG8NKFRDY.SEARCH&ppt=sp&ppn=sp&ssid=l3f0en9g8g0000001749372704906&qH=8e0ee2dac8c1afb1",
+#         "data": {
+#           "product_title": "Apple iPhone 16 (Black, 128 GB)",
+#           "price": "₹74,900",
+#           "original_price": "₹79,900",
+#           "discount": "6% off",
+#           "offers": [
+#             "5% Unlimited Cashback on Flipkart Axis Bank Credit Card",
+#             "₹2500 Off On Flipkart Axis Bank Credit Card Non EMI Transactions.",
+#             "₹4000 Off On All Banks Credit Card Transactions.",
+#             "Get extra ₹5000 off (price inclusive of cashback/coupon)"
+#           ],
+#           "brand": "Apple",
+#           "rating": "4.6",
+#           "reviews_count": "725"
+#         }
+#       }
+#     },
+#     {
+#       "listing_info": {
+#         "title": "Apple iPhone 16 (Pink, 256 GB)",
+#         "price_str": "₹84,900",
+#         "rating_str": null,
+#         "url": "https://www.flipkart.com/apple-iphone-16-pink-256-gb/p/itm0d8c695cded44?pid=MOBH4DQF28XAYM2S&lid=LSTMOBH4DQF28XAYM2S3JPA23&marketplace=FLIPKART&q=iPhone+16&store=tyy%2F4io&srno=s_1_2&otracker=search&fm=organic&iid=c111715d-0551-4030-9e77-e494ad176729.MOBH4DQF28XAYM2S.SEARCH&ppt=None&ppn=None&ssid=l3f0en9g8g0000001749372704906&qH=8e0ee2dac8c1afb1",   
+#         "platform": "Flipkart"
+#       },
+#       "detailed_info": {
+#         "platform": "flipkart",
+#         "url": "https://www.flipkart.com/apple-iphone-16-pink-256-gb/p/itm0d8c695cded44?pid=MOBH4DQF28XAYM2S&lid=LSTMOBH4DQF28XAYM2S3JPA23&marketplace=FLIPKART&q=iPhone+16&store=tyy%2F4io&srno=s_1_2&otracker=search&fm=organic&iid=c111715d-0551-4030-9e77-e494ad176729.MOBH4DQF28XAYM2S.SEARCH&ppt=None&ppn=None&ssid=l3f0en9g8g0000001749372704906&qH=8e0ee2dac8c1afb1",   
+#         "data": {
+#           "product_title": "Apple iPhone 16 (Pink, 256 GB)",
+#           "price": "₹84,900",
+#           "original_price": "₹89,900",
+#           "discount": "5% off",
+#           "offers": [
+#             "5% Unlimited Cashback on Flipkart Axis Bank Credit Card",
+#             "₹2500 Off On Flipkart Axis Bank Credit Card Non EMI Transactions.",
+#             "₹4000 Off On All Banks Credit Card Transactions.",
+#             "Get extra ₹5000 off (price inclusive of cashback/coupon)"
+#           ],
+#           "brand": "Apple",
+#           "rating": "4.6",
+#           "reviews_count": "17,203 Ratings & 725 Reviews"
+#         }
+#       }
+#     },
+#     {
+#       "listing_info": {
+#         "title": "Apple iPhone 16 (Black, 256 GB)",
+#         "price_str": "₹84,900",
+#         "rating_str": null,
+#         "url": "https://www.flipkart.com/apple-iphone-16-black-256-gb/p/itm86da1977dcdf1?pid=MOBH4DQFZCJJXUFG&lid=LSTMOBH4DQFZCJJXUFGO5DY3W&marketplace=FLIPKART&q=iPhone+16&store=tyy%2F4io&srno=s_1_3&otracker=search&fm=organic&iid=c111715d-0551-4030-9e77-e494ad176729.MOBH4DQFZCJJXUFG.SEARCH&ppt=None&ppn=None&ssid=l3f0en9g8g0000001749372704906&qH=8e0ee2dac8c1afb1",  
+#         "platform": "Flipkart"
+#       },
+#       "detailed_info": {
+#         "platform": "flipkart",
+#         "url": "https://www.flipkart.com/apple-iphone-16-black-256-gb/p/itm86da1977dcdf1?pid=MOBH4DQFZCJJXUFG&lid=LSTMOBH4DQFZCJJXUFGO5DY3W&marketplace=FLIPKART&q=iPhone+16&store=tyy%2F4io&srno=s_1_3&otracker=search&fm=organic&iid=c111715d-0551-4030-9e77-e494ad176729.MOBH4DQFZCJJXUFG.SEARCH&ppt=None&ppn=None&ssid=l3f0en9g8g0000001749372704906&qH=8e0ee2dac8c1afb1",  
+#         "data": {
+#           "product_title": "Apple iPhone 16 (Black, 256 GB)",
+#           "price": "₹84,900",
+#           "original_price": "₹89,900",
+#           "discount": "5% off",
+#           "offers": [
+#             "5% Unlimited Cashback on Flipkart Axis Bank Credit Card",
+#             "₹2500 Off On Flipkart Axis Bank Credit Card Non EMI Transactions.",
+#             "₹4000 Off On All Banks Credit Card Transactions.",
+#             "Get extra ₹5000 off (price inclusive of cashback/coupon)"
+#           ],
+#           "brand": "Apple",
+#           "rating": "4.6",
+#           "reviews_count": "17,203"
+#         }
+#       }
+#     },
+#     {
+#       "listing_info": {
+#         "title": "Apple iPhone 16 (Teal, 128 GB)",
+#         "price_str": "₹74,900",
+#         "rating_str": null,
+#         "url": "https://www.flipkart.com/apple-iphone-16-teal-128-gb/p/itmce4bb3f55cc2f?pid=MOBH4DQFSY9ETDUU&lid=LSTMOBH4DQFSY9ETDUUI6AN3O&marketplace=FLIPKART&q=iPhone+16&store=tyy%2F4io&srno=s_1_4&otracker=search&fm=organic&iid=c111715d-0551-4030-9e77-e494ad176729.MOBH4DQFSY9ETDUU.SEARCH&ppt=None&ppn=None&ssid=l3f0en9g8g0000001749372704906&qH=8e0ee2dac8c1afb1",   
+#         "platform": "Flipkart"
+#       },
+#       "detailed_info": {
+#         "platform": "flipkart",
+#         "url": "https://www.flipkart.com/apple-iphone-16-teal-128-gb/p/itmce4bb3f55cc2f?pid=MOBH4DQFSY9ETDUU&lid=LSTMOBH4DQFSY9ETDUUI6AN3O&marketplace=FLIPKART&q=iPhone+16&store=tyy%2F4io&srno=s_1_4&otracker=search&fm=organic&iid=c111715d-0551-4030-9e77-e494ad176729.MOBH4DQFSY9ETDUU.SEARCH&ppt=None&ppn=None&ssid=l3f0en9g8g0000001749372704906&qH=8e0ee2dac8c1afb1",   
+#         "data": {
+#           "product_title": "Apple iPhone 16 (Teal, 128 GB)",
+#           "price": "₹74,900",
+#           "original_price": "₹79,900",
+#           "discount": "6% off",
+#           "offers": [
+#             "5% Unlimited Cashback on Flipkart Axis Bank Credit Card",
+#             "₹2500 Off On Flipkart Axis Bank Credit Card Non EMI Transactions.",
+#             "₹4000 Off On All Banks Credit Card Transactions.",
+#             "Get extra ₹5000 off (price inclusive of cashback/coupon)"
+#           ],
+#           "brand": "Apple",
+#           "rating": "4.6",
+#           "reviews_count": "17,203 Ratings & 725 Reviews"
+#         }
+#       }
+#     },
+#     {
+#       "listing_info": {
+#         "title": "Apple iPhone 16 (White, 128 GB)",
+#         "price_str": "₹74,900",
+#         "rating_str": null,
+#         "url": "https://www.flipkart.com/apple-iphone-16-white-128-gb/p/itm7c0281cd247be?pid=MOBH4DQF849HCG6G&lid=LSTMOBH4DQF849HCG6GXHBPXY&marketplace=FLIPKART&q=iPhone+16&store=tyy%2        "url": "https://www.flipkart.com/apple-iphone-16-white-128-gb/p/itm7c0281cd247be?pid=MOBH4DQF849HCG6G&lid=LSTMOBH4DQF849HCG6GXHBPXY&marketplace=FLIPKART&q=iPhone+16&store=tyy%2F4io&spotlightTagId=default_BestsellerId_tyy%2F4io&srno=s_1_5&otracker=search&fm=organic&iid=c111715d-0551-4030-9e77-e494ad176729.MOBH4DQF849HCG6G.SEARCH&ppt=sp&ppn=sp&ssid=l3f0en9g8g0000001749372704906&qH=8e0ee2dac8c1afb1",
+#         "platform": "Flipkart"
+# 000001749372704906&qH=8e0ee2dac8c1afb1",
+#         "platform": "Flipkart"
+#       },
+#         "platform": "Flipkart"
+#       },
+#       },
+#       "detailed_info": {
+#       "detailed_info": {
+#         "platform": "flipkart",
+#         "platform": "flipkart",
+#         "url": "https://www.flipkart.com/apple-iphone-16-white-128-gb/p/itm7c0281cd247be?pid=MOBH4DQF849HCG6G&lid=LSTMOBH4DQF849HCG6GXHBPXY&marketplace=FLIPKART&q=iPhone+16&store=tyy%2        "url": "https://www.flipkart.com/apple-iphone-16-white-128-gb/p/itm7c0281cd247be?pid=MOBH4DQF849HCG6G&lid=LSTMOBH4DQF849HCG6GXHBPXY&marketplace=FLIPKART&q=iPhone+16&store=tyy%2F4io&spotlightTagId=default_BestsellerId_tyy%2F4io&srno=s_1_5&otracker=search&fm=organic&iid=c111715d-0551-4030-9e77-e494ad176729.MOBH4DQF849HCG6G.SEARCH&ppt=sp&ppn=sp&ssid=l3f0en9g8g0F4io&spotlightTagId=default_BestsellerId_tyy%2F4io&srno=s_1_5&otracker=search&fm=organic&iid=c111715d-0551-4030-9e77-e494ad176729.MOBH4DQF849HCG6G.SEARCH&ppt=sp&ppn=sp&ssid=l3f0en9g8g0000001749372704906&qH=8e0ee2dac8c1afb1",
+#         "data": {
+#           "product_title": "Apple iPhone 16 (White, 128 GB)",
+#           "price": "₹74,900",
+#           "original_price": "₹79,900",
+#           "discount": "6% off",
+#           "offers": [
+#             "5% Unlimited Cashback on Flipkart Axis Bank Credit Card",
+#             "₹2500 Off On Flipkart Axis Bank Credit Card Non EMI Transactions.",
+#             "₹4000 Off On All Banks Credit Card Transactions.",
+#             "Get extra ₹5000 off (price inclusive of cashback/coupon)"
+#           ],
+#           "brand": "Apple",
+#           "rating": "4.6",
+#           "reviews_count": "725"
+#         }
+#       }
+#     }
+#   ]
+# }
+# 💾 Results saved to product_results.json
