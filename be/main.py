@@ -9,10 +9,11 @@ from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig, CacheMode
 from crawl4ai.extraction_strategy import JsonCssExtractionStrategy
 from firecrawl import FirecrawlApp
 
-# Load environment variables
 load_dotenv()
 
-# Pydantic Models
+class ExtractSchema(BaseModel):
+    offer_details: str
+
 class AmazonProduct(BaseModel):
     product_title: str = Field(description="The title of the product")
     price: str = Field(description="The current price of the product, including currency")
@@ -30,7 +31,18 @@ class FlipkartProduct(BaseModel):
     rating: str = Field(description="The product rating out of 5", default="")
     reviews_count: str = Field(description="Number of reviews/ratings", default="")
 
-# Updated CSS Extraction Schemas with better selectors
+class GenericProduct(BaseModel):
+    product_title: str = Field(description="The title of the product")
+    price: str = Field(description="The current price of the product, including currency")
+    original_price: str = Field(description="The original price before discount, if available", default="")
+    discount: str = Field(description="The discount percentage or amount, if available", default="")
+    offers: list[str] = Field(description="List of current offers on the product", default_factory=list)
+    brand: str = Field(description="The brand of the product", default="")
+    rating: str = Field(description="The product rating", default="")
+    reviews_count: str = Field(description="Number of reviews/ratings", default="")
+    availability: str = Field(description="Product availability status", default="")
+
+# CSS selectors for different platforms
 amazon_css_listing_schema = {
     "name": "AmazonProductListing",
     "baseSelector": 'div[data-component-type="s-search-result"], div[data-asin]',
@@ -54,73 +66,120 @@ flipkart_css_listing_schema = {
     ]
 }
 
-# Browser Configuration
+bigbasket_css_listing_schema = {
+    "name": "BigBasketProductListing",
+    "baseSelector": '.SKUDeck___StyledDiv-sc-1e5d9gk-0, .product, div[qa="product"]',
+    "fields": [
+        {"name": "title", "selector": '.truncate___StyledP-sc-11x0qrx-0, .product-name, h3', "type": "text", "optional": True},
+        {"name": "price", "selector": '.Pricing___StyledDiv-sc-pldi2d-0, .discounted-price, .price', "type": "text", "optional": True},
+        {"name": "original_price", "selector": '.Label___StyledLabel-sc-15v1nk5-0, .list-price', "type": "text", "optional": True},
+        {"name": "url", "selector": 'a', "type": "attribute", "attribute": "href", "optional": True}
+    ]
+}
+
+# blinkit_css_listing_schema = {
+#     "name": "BlinkitProductListing",
+#     "baseSelector": 'div[data-testid="plp-product"], .Product__UpdatedC, .ProductPod, div.css-1of2wjo',
+#     "fields": [
+#         {"name": "title", "selector": ".Product__UpdatedProductTitle, .ProductPod__productName, .css-1c4d9c0, .css-16ny8c6", "type": "text", "optional": True},
+#         {"name": "price", "selector": ".Product__UpdatedPrice, .ProductPod__price, .css-1kbz84u, .css-1p6zl5q", "type": "text", "optional": True},
+#         {"name": "original_price", "selector": ".Product__UpdatedStrikedPrice, .ProductPod__strikeThroughPrice, .css-12rfzbx", "type": "text", "optional": True},
+#         {"name": "url", "selector": 'a', "type": "attribute", "attribute": "href", "optional": True}
+#     ]
+# }
+
+# zepto_css_listing_schema = {
+#     "name": "ZeptoProductListing",
+#     "baseSelector": '.css-79elbk, .css-1b4d9k7, div[data-testid="product-card"]',
+#     "fields": [
+#         {"name": "title", "selector": ".css-1w8ee6h, .css-1no0p6n, h3", "type": "text", "optional": True},
+#         {"name": "price", "selector": ".css-1lx8n8m, .css-1u8zkwz, .price", "type": "text", "optional": True},
+#         {"name": "original_price", "selector": ".css-1qb0j9l, .strike-price", "type": "text", "optional": True},
+#         {"name": "url", "selector": 'a', "type": "attribute", "attribute": "href", "optional": True}
+#     ]
+# }
+
+# swiggy_css_listing_schema = {
+#     "name": "SwiggyProductListing",
+#     "baseSelector": 'div[data-testid="normal-instamart-item"], .styles_itemContainer, .product-item',
+#     "fields": [
+#         {"name": "title", "selector": '.styles_itemNameText, .product-title, h3', "type": "text", "optional": True},
+#         {"name": "price", "selector": '.styles_priceDisplay, .product-price, .price', "type": "text", "optional": True},
+#         {"name": "original_price", "selector": '.styles_originalPrice, .strike-price', "type": "text", "optional": True},
+#         {"name": "url", "selector": 'a', "type": "attribute", "attribute": "href", "optional": True}
+#     ]
+# }
+
+# myntra_css_listing_schema = {
+#     "name": "MyntraProductListing",
+#     "baseSelector": '.product-base, .product-productMetaInfo, li.product-base',
+#     "fields": [
+#         {"name": "title", "selector": '.product-product, .product-brand, h3, h4', "type": "text", "optional": True},
+#         {"name": "price", "selector": '.product-discountedPrice, .product-price, .price', "type": "text", "optional": True},
+#         {"name": "original_price", "selector": '.product-strike, .strike-price', "type": "text", "optional": True},
+#         {"name": "rating", "selector": '.product-rating, .rating', "type": "text", "optional": True},
+#         {"name": "url", "selector": 'a', "type": "attribute", "attribute": "href", "optional": True}
+#     ]
+# }
+
 browser_config = BrowserConfig(
     headless=True,
     viewport_width=1920,
     viewport_height=1080,
-    verbose=True,  # Enable verbose logging
+    verbose=True,
     user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     java_script_enabled=True,
 )
 
 def detect_platform(url: str) -> str:
-    """Detect whether the URL is from Amazon or Flipkart"""
-    if "amazon." in url.lower():
+    url_lower = url.lower()
+    if "amazon." in url_lower:
         return "amazon"
-    elif "flipkart." in url.lower():
+    elif "flipkart." in url_lower:
         return "flipkart"
+    # elif "blinkit." in url_lower or "grofers." in url_lower:
+    #     return "blinkit"
+    # elif "zepto." in url_lower:
+    #     return "zepto"
+    elif "bigbasket." in url_lower:
+        return "bigbasket"
+    # elif "swiggy." in url_lower and "instamart" in url_lower:
+    #     return "swiggy"
+    # elif "myntra." in url_lower:
+    #     return "myntra"
     else:
         return "unknown"
 
+def clean_data_for_json(data):
+    if isinstance(data, dict):
+        cleaned = {}
+        for key, value in data.items():
+            try:
+                json.dumps(value)
+                cleaned[key] = clean_data_for_json(value)
+            except (TypeError, ValueError):
+                print(f"⚠️  Skipping non-serializable field: {key}")
+                continue
+        return cleaned
+    elif isinstance(data, list):
+        cleaned = []
+        for item in data:
+            try:
+                json.dumps(item)
+                cleaned.append(clean_data_for_json(item))
+            except (TypeError, ValueError):
+                continue
+        return cleaned
+    else:
+        return data
+
 def scrape_product_details(url: str) -> Dict:
-    """Scrape detailed product information from a product URL using Firecrawl"""
-    try:
-        print(f"🔍 Scraping details for: {url[:80]}...")
-        
-        api_key = os.getenv("FIRECRAWL_API_KEY")
-        if not api_key:
-            print("❌ FIRECRAWL_API_KEY not set")
-            return {"error": "FIRECRAWL_API_KEY not set", "url": url}
-        
-        app = FirecrawlApp(api_key=api_key)
-        platform = detect_platform(url)
-        
-        print(f"📱 Platform detected: {platform}")
-        
-        if platform == "amazon":
-            result = app.scrape_url(
-                url,
-                formats=['json'],
-                jsonOptions={'schema': AmazonProduct.model_json_schema()}
-            )
-        elif platform == "flipkart":
-            result = app.scrape_url(
-                url,
-                formats=['json'],
-                jsonOptions={'schema': FlipkartProduct.model_json_schema()}
-            )
-        else:
-            print(f"❌ Unsupported platform: {platform}")
-            return {"error": "Unsupported platform", "url": url}
-        
-        # Extract JSON data from result
-        if hasattr(result, 'json') and result.json:
-            print(f"✅ Successfully scraped {platform} product details")
-            return {"platform": platform, "url": url, "data": result.json}
-        elif isinstance(result, dict) and 'json' in result and result['json']:
-            print(f"✅ Successfully scraped {platform} product details")
-            return {"platform": platform, "url": url, "data": result['json']}
-        else:
-            print(f"❌ Failed to extract product data from {platform}")
-            return {"error": "Failed to extract product data", "url": url}
-    
-    except Exception as e:
-        print(f"❌ Exception while scraping {url}: {str(e)}")
-        return {"error": str(e), "url": url}
+    app = FirecrawlApp(api_key=os.getenv("FIRECRAWL_API_KEY"))
+    data = app.extract([url
+    ], prompt='Extract the offer details from the page', schema=ExtractSchema.model_json_schema()).data
+    return data
 
 async def scrape_product_listings(product_query: str, max_products_per_platform: int = 5) -> List[Dict]:
-    """Scrape product listings from Amazon and Flipkart using Crawl4AI"""
     platforms = {
         "amazon": {
             "search_url": f"https://www.amazon.in/s?k={product_query.replace(' ', '+')}&ref=nb_sb_noss",
@@ -132,669 +191,128 @@ async def scrape_product_listings(product_query: str, max_products_per_platform:
             "base_url": "https://www.flipkart.com",
             "schema": flipkart_css_listing_schema
         },
+        "bigbasket": {
+            "search_url": f"https://www.bigbasket.com/ps/?q={product_query.replace(' ', '%20')}",
+            "base_url": "https://www.bigbasket.com",
+            "schema": bigbasket_css_listing_schema
+        },
+        # "blinkit": {
+        #     "search_url": f"https://blinkit.com/s/?q={product_query.replace(' ', '%20')}",
+        #     "base_url": "https://blinkit.com",
+        #     "schema": blinkit_css_listing_schema
+        # },
+        # "zepto": {
+        #     "search_url": f"https://www.zepto.com/search?query={product_query.replace(' ', '%20')}",
+        #     "base_url": "https://www.zepto.com",
+        #     "schema": zepto_css_listing_schema
+        # },
+        # "swiggy": {
+        #     "search_url": f"https://www.swiggy.com/instamart/search?custom_back=true&query={product_query.replace(' ', '%20')}",
+        #     "base_url": "https://www.swiggy.com",
+        #     "schema": swiggy_css_listing_schema
+        # },
+        # "myntra": {
+        #     "search_url": f"https://www.myntra.com/{product_query.replace(' ', '-')}",
+        #     "base_url": "https://www.myntra.com",
+        #     "schema": myntra_css_listing_schema
+        # }
     }
 
     listings = []
-    processed_urls = set()  # Track processed URLs to avoid duplicates
+    processed_urls = set()
     
     async with AsyncWebCrawler(config=browser_config) as crawler:
         for platform_name, info in platforms.items():
-            try:
-                print(f"\n🌐 Starting to scrape {platform_name.upper()}...")
-                print(f"🔗 URL: {info['search_url']}")
-                
-                crawl_config = CrawlerRunConfig(
-                    extraction_strategy=JsonCssExtractionStrategy(info['schema'], verbose=False),
-                    cache_mode=CacheMode.BYPASS,
-                    wait_for="body",
-                    page_timeout=30000,
-                    js_code="""
-                    // Wait for content to load and scroll a bit
-                    await new Promise(resolve => setTimeout(resolve, 3000));
-                    window.scrollTo(0, 500);
-                    await new Promise(resolve => setTimeout(resolve, 1000));
-                    """
-                )
-                
-                result = await crawler.arun(url=info['search_url'], config=crawl_config)
-                
-                if result.success and result.extracted_content:
-                    print(f"✅ {platform_name} page loaded successfully")
-                    
-                    try:
-                        raw_data = json.loads(result.extracted_content) if isinstance(result.extracted_content, str) else result.extracted_content
-                        print(f"📊 Raw data extracted from {platform_name}: {len(raw_data)} items")
-                        
-                        # Debug: Print first item structure
-                        if raw_data:
-                            print(f"🔍 Sample item from {platform_name}: {raw_data[0]}")
-                        
-                        count = 0
-                        for item in raw_data:
-                            if count >= max_products_per_platform:
-                                break
-                            
-                            title = item.get('title', '').strip()
-                            if not title:
-                                print(f"⚠️  Skipping item with no title: {item}")
-                                continue
-                            
-                            # Process URL
-                            url = item.get('url', '')
-                            if platform_name == "amazon":
-                                if not url.startswith('http'):
-                                    url = info['base_url'] + url
-                                asin_match = re.search(r'/dp/([A-Z0-9]{10})', url)
-                                if asin_match:
-                                    url = f"{info['base_url']}/dp/{asin_match.group(1)}"
-                                else:
-                                    # Try to get ASIN from the item
-                                    asin = item.get('asin_direct', '')
-                                    if asin:
-                                        url = f"{info['base_url']}/dp/{asin}"
-                                    else:
-                                        print(f"⚠️  No valid Amazon URL/ASIN for: {title}")
-                                        continue
-                            else:  # flipkart
-                                if not url.startswith('http'):
-                                    url = info['base_url'] + url
-                            
-                            # Check for duplicates
-                            if url in processed_urls:
-                                print(f"⚠️  Skipping duplicate URL: {url}")
-                                continue
-                            
-                            processed_urls.add(url)
-                            
-                            listing_item = {
-                                'title': title,
-                                'price_str': item.get('price', ''),
-                                'rating_str': item.get('rating'),
-                                'url': url,
-                                'platform': platform_name.capitalize()
-                            }
-                            
-                            listings.append(listing_item)
-                            count += 1
-                            print(f"✅ Added {platform_name} product #{count}: {title[:50]}...")
-                    
-                    except json.JSONDecodeError as e:
-                        print(f"❌ JSON decode error for {platform_name}: {e}")
-                        print(f"Raw content preview: {str(result.extracted_content)[:200]}")
-                
-                else:
-                    print(f"❌ Failed to scrape {platform_name}")
-                    if hasattr(result, 'error_message'):
-                        print(f"Error message: {result.error_message}")
+            print(f"🔍 Scraping {platform_name.capitalize()}...")
+            js_code = """
+            await new Promise(resolve => setTimeout(resolve, 3000));
+            window.scrollTo(0, 500);
+            await new Promise(resolve => setTimeout(resolve, 1000));
+            """
+
+            if platform_name in ["blinkit", "zepto", "swiggy"]:
+                js_code += """
+                await new Promise(resolve => setTimeout(resolve, 2000));
+                """
+
+            crawl_config = CrawlerRunConfig(
+                extraction_strategy=JsonCssExtractionStrategy(info['schema'], verbose=False),
+                cache_mode=CacheMode.BYPASS,
+                wait_for="body",
+                page_timeout=40000, 
+                js_code=js_code
+            )
             
-            except Exception as e:
-                print(f"❌ Exception while scraping {platform_name}: {e}")
-                import traceback
-                traceback.print_exc()
-                continue
-    
-    print(f"\n📈 SCRAPING SUMMARY:")
-    amazon_count = len([l for l in listings if l['platform'] == 'Amazon'])
-    flipkart_count = len([l for l in listings if l['platform'] == 'Flipkart'])
-    print(f"   Amazon products found: {amazon_count}")
-    print(f"   Flipkart products found: {flipkart_count}")
-    print(f"   Total unique listings: {len(listings)}")
-    
+            result = await crawler.arun(url=info['search_url'], config=crawl_config)
+            
+            if result.success and result.extracted_content:
+                raw_data = json.loads(result.extracted_content) if isinstance(result.extracted_content, str) else result.extracted_content
+
+                count = 0
+                for item in raw_data:
+                    if count >= max_products_per_platform:
+                        break
+
+                    title = item.get('title', '').strip()
+                    if not title:
+                        continue
+
+                    url = item.get('url', '')
+
+                    if platform_name == "amazon":
+                        if not url.startswith('http'):
+                            url = info['base_url'] + url
+                        asin_match = re.search(r'/dp/([A-Z0-9]{10})', url)
+                        if asin_match:
+                            url = f"{info['base_url']}/dp/{asin_match.group(1)}"
+                        else:
+                            asin = item.get('asin_direct', '')
+                            if asin:
+                                url = f"{info['base_url']}/dp/{asin}"
+                            else:
+                                continue
+                    else:
+                        if url and not url.startswith('http'):
+                            url = info['base_url'] + url
+                    
+                    if not url or url in processed_urls:
+                        continue
+                    
+                    processed_urls.add(url)
+                    
+                    listing_item = {
+                        'title': title,
+                        'price_str': item.get('price', ''),
+                        'original_price_str': item.get('original_price', ''),
+                        'rating_str': item.get('rating'),
+                        'url': url,
+                        'platform': platform_name.capitalize()
+                    }
+                    
+                    listings.append(listing_item)
+                    count += 1
     return listings
 
-async def run_product_pipeline(product_query: str = "iPhone 16", max_products_per_platform: int = 5, max_detail_pages: int = 10):
-    """Main pipeline function that combines Crawl4AI listings with Firecrawl details"""
-
-    print(f"🚀 Step 1: Scraping product listings for '{product_query}'...")
+async def run_product_pipeline(product_query: str = "iPhone 16", max_products_per_platform: int = 5):  
     listings = await scrape_product_listings(product_query, max_products_per_platform)
-    
-    if not listings:
-        print("❌ No product listings found")
-        return {"error": "No product listings found"}
-    
-    print(f"\n✅ Found {len(listings)} product listings total")
-    
-    # Step 2: Get detailed information for each product using Firecrawl
-    print(f"\n🚀 Step 2: Scraping detailed information for up to {max_detail_pages} products...")
-    
     detailed_products = []
-    processed_count = 0
-    
-    for i, listing in enumerate(listings):
-        if processed_count >= max_detail_pages:
-            break
-        
-        print(f"\n📦 Processing product {processed_count + 1}/{min(len(listings), max_detail_pages)}")
-        print(f"   Platform: {listing['platform']}")
-        print(f"   Title: {listing['title'][:60]}...")
-        
-        # Get detailed product information
+    for listing in listings:
         detail_result = scrape_product_details(listing['url'])
+        cleaned_listing = clean_data_for_json(listing)
         
-        # Combine listing and detail information
         combined_product = {
-            "listing_info": listing,
+            "listing_info": cleaned_listing,
             "detailed_info": detail_result
         }
-        
         detailed_products.append(combined_product)
-        processed_count += 1
-    
-    # Step 3: Return final JSON with all product information
+        
     final_result = {
         "query": product_query,
         "total_listings_found": len(listings),
         "detailed_products_processed": len(detailed_products),
         "products": detailed_products
     }
-    
-    return final_result
-
-def save_results_to_file(results: Dict, filename: str = "product_results.json"):
-    """Save results to a JSON file"""
-    with open(filename, 'w', encoding='utf-8') as f:
-        json.dump(results, f, indent=2, ensure_ascii=False)
-    print(f"💾 Results saved to {filename}")
-
-async def main(product_query: str = "iPhone 16", max_products_per_platform: int = 2, max_detail_pages: int = 4):
-    """Main execution function"""
-    
-    print("="*80)
-    print("🛒 PRODUCT SCRAPING PIPELINE")
-    print("="*80)
-    print(f"🔍 Query: {product_query}")
-    print(f"📊 Max products per platform: {max_products_per_platform}")
-    print(f"🔍 Max detail pages: {max_detail_pages}")
-    print("="*80)
-    
-    # Run the pipeline
-    results = await run_product_pipeline(
-        product_query=product_query,
-        max_products_per_platform=max_products_per_platform,
-        max_detail_pages=max_detail_pages
-    )
-    
-    # Print results summary
-    print("\n" + "="*80)
-    print("📊 FINAL RESULTS SUMMARY")
-    print("="*80)
-    
-    if "products" in results:
-        amazon_products = [p for p in results["products"] if p["listing_info"]["platform"] == "Amazon"]
-        flipkart_products = [p for p in results["products"] if p["listing_info"]["platform"] == "Flipkart"]
-        
-        print(f"🛒 Amazon products: {len(amazon_products)}")
-        print(f"🛒 Flipkart products: {len(flipkart_products)}")
-        print(f"🛒 Total products: {len(results['products'])}")
-        
-        # Show sample of each platform
-        if amazon_products:
-            print(f"\n📱 Sample Amazon product:")
-            sample = amazon_products[0]
-            print(f"   Title: {sample['listing_info']['title']}")
-            print(f"   Price: {sample['listing_info']['price_str']}")
-            if 'data' in sample['detailed_info']:
-                print(f"   Detailed scraped: ✅")
-            else:
-                print(f"   Detailed scraped: ❌ ({sample['detailed_info'].get('error', 'Unknown error')})")
-        
-        if flipkart_products:
-            print(f"\n📱 Sample Flipkart product:")
-            sample = flipkart_products[0]
-            print(f"   Title: {sample['listing_info']['title']}")
-            print(f"   Price: {sample['listing_info']['price_str']}")
-            if 'data' in sample['detailed_info']:
-                print(f"   Detailed scraped: ✅")
-            else:
-                print(f"   Detailed scraped: ❌ ({sample['detailed_info'].get('error', 'Unknown error')})")
-    
-    print("\n" + "="*80)
-    print("📋 FULL RESULTS (JSON)")
-    print("="*80)
-    print(json.dumps(results, indent=2, ensure_ascii=False))
-    
-    # Save to file
-    save_results_to_file(results)
-    
-    return results
+    return clean_data_for_json(final_result)
 
 if __name__ == "__main__":
-    asyncio.run(main())
-    
-# ================================================================================
-# 🛒 PRODUCT SCRAPING PIPELINE
-# ================================================================================
-# 🔍 Query: iPhone 16
-# 📊 Max products per platform: 5
-# 🔍 Max detail pages: 10
-# ================================================================================
-# 🚀 Step 1: Scraping product listings for 'iPhone 16'...
-# [INIT].... → Crawl4AI 0.6.3
-
-# 🌐 Starting to scrape AMAZON...
-# 🔗 URL: https://www.amazon.in/s?k=iPhone+16&ref=nb_sb_noss
-# [FETCH]... ↓ https://www.amazon.in/s?k=iPhone+16&ref=nb_sb_noss                                                   | ✓ | ⏱: 6.06s 
-# [SCRAPE].. ◆ https://www.amazon.in/s?k=iPhone+16&ref=nb_sb_noss                                                   | ✓ | ⏱: 0.62s 
-# [EXTRACT]. ■ Completed for https://www.amazon.in/s?k=iPhone+16&ref=nb_sb_noss... | Time: 0.6427810000022873s 
-# [COMPLETE] ● https://www.amazon.in/s?k=iPhone+16&ref=nb_sb_noss                                                   | ✓ | ⏱: 7.33s 
-# ✅ amazon page loaded successfully
-# 📊 Raw data extracted from amazon: 30 items
-# 🔍 Sample item from amazon: {'rating': '4.4 out of 5 stars.'}
-# ⚠️  Skipping item with no title: {'rating': '4.4 out of 5 stars.'}
-# ⚠️  Skipping item with no title: {'rating': '4.4 out of 5 stars.'}
-# ⚠️  Skipping item with no title: {'rating': '4.4 out of 5 stars.'}
-# ⚠️  Skipping item with no title: {'rating': '4.4 out of 5 stars.'}
-# ⚠️  No valid Amazon URL/ASIN for: iPhone 16 128 GB: 5G Mobile Phone with Camera Control, A18 Chip and a Big Boost in Battery Life. Works with AirPods; Black
-# ⚠️  No valid Amazon URL/ASIN for: iPhone 16 Pro 128 GB: 5G Mobile Phone with Camera Control, 4K 120 fps Dolby Vision and a Huge Leap in Battery Life. Works with AirPods; Natural Titanium
-# ✅ Added amazon product #1: iPhone 16 128 GB: 5G Mobile Phone with Camera Cont...
-# ✅ Added amazon product #2: iPhone 16 Pro Max 256 GB: 5G Mobile Phone with Cam...
-# ✅ Added amazon product #3: iPhone 16 128 GB: 5G Mobile Phone with Camera Cont...
-# ⚠️  No valid Amazon URL/ASIN for: iPhone 16e 128 GB: Built for Apple Intelligence, A18 Chip, Supersized Battery Life, 48MP Fusion. Camera, 15.40 cm (6.1″) Super Retina XDR Display; Blaack
-# ⚠️  No valid Amazon URL/ASIN for: iPhone 16e 128 GB: Built for Apple Intelligence, A18 Chip, Supersized Battery Life, 48MP Fusion. Camera, 15.40 cm (6.1″) Super Retina XDR Display; Blaack
-# ⚠️  No valid Amazon URL/ASIN for: Apple iPhone 15 (128 GB) - Blue
-# ⚠️  No valid Amazon URL/ASIN for: iPhone 16 Pro 128 GB: 5G Mobile Phone with Camera Control, 4K 120 fps Dolby Vision and a Huge Leap in Battery Life. Works with AirPods; Natural Titaniium
-# ⚠️  No valid Amazon URL/ASIN for: iPhone 16 Pro Max 256 GB: 5G Mobile Phone with Camera Control, 4K 120 fps Dolby Vision and a Huge Leap in Battery Life. Works with AirPods; Desert Tittanium
-# ⚠️  No valid Amazon URL/ASIN for: iPhone 16 512 GB: 5G Mobile Phone with Camera Control, A18 Chip and a Big Boost in Battery Life. Works with AirPods; Ultramarine
-# ✅ Added amazon product #4: iPhone 16 128 GB: 5G Mobile Phone with Camera Cont...
-# ✅ Added amazon product #5: iPhone 16 Pro 256 GB: 5G Mobile Phone with Camera ...
-
-# 🌐 Starting to scrape FLIPKART...
-# 🔗 URL: https://www.flipkart.com/search?q=iPhone%2016
-# [FETCH]... ↓ https://www.flipkart.com/search?q=iPhone 16                                                          | ✓ | ⏱: 5.53s 
-# [SCRAPE].. ◆ https://www.flipkart.com/search?q=iPhone 16                                                          | ✓ | ⏱: 0.18s 
-# [EXTRACT]. ■ Completed for https://www.flipkart.com/search?q=iPhone%2016... | Time: 0.7851784999947995s 
-# [COMPLETE] ● https://www.flipkart.com/search?q=iPhone 16                                                          | ✓ | ⏱: 6.51s 
-# ✅ flipkart page loaded successfully
-# 📊 Raw data extracted from flipkart: 51 items
-# 🔍 Sample item from flipkart: {'title': 'Apple iPhone 16 (Black, 128 GB)', 'price': '₹74,900', 'url': '/apple-iphone-16-black-128-gb/p/itmb07d67f995271?pid=MOBH4DQFG8NKFRDY&lid=LSTMOBH4DQFG8NKFRDYNBDOZI&marketplace=FLIPKART&q=iPhone+16&store=tyy%2F4io&spotlightTagId=default_BestsellerId_tyy%2F4io&srno=s_1_1&otracker=search&fm=organic&iid=c111715d-0551-4030-9e77-e494ad176729.MOBH4DQFG8NKFRDY.SEARCH&ppt=sp&ppn=sp&ssid=l3f0en9g8g0000001749372704906&qH=8e0ee2dac8c1afb1'}
-# ✅ Added flipkart product #1: Apple iPhone 16 (Black, 128 GB)...
-# ⚠️  Skipping duplicate URL: https://www.flipkart.com/apple-iphone-16-black-128-gb/p/itmb07d67f995271?pid=MOBH4DQFG8NKFRDY&lid=LSTMOBH4DQFG8NKFRDYNBDOZI&marketplace=FLIPKART&q=iPhone+166&store=tyy%2F4io&spotlightTagId=default_BestsellerId_tyy%2F4io&srno=s_1_1&otracker=search&fm=organic&iid=c111715d-0551-4030-9e77-e494ad176729.MOBH4DQFG8NKFRDY.SEARCH&ppt=sp&ppn=sp&ssid=l3f0en9g8g0000001749372704906&qH=8e0ee2dac8c1afb1
-# ⚠️  Skipping duplicate URL: https://www.flipkart.com/apple-iphone-16-black-128-gb/p/itmb07d67f995271?pid=MOBH4DQFG8NKFRDY&lid=LSTMOBH4DQFG8NKFRDYNBDOZI&marketplace=FLIPKART&q=iPhone+166&store=tyy%2F4io&spotlightTagId=default_BestsellerId_tyy%2F4io&srno=s_1_1&otracker=search&fm=organic&iid=c111715d-0551-4030-9e77-e494ad176729.MOBH4DQFG8NKFRDY.SEARCH&ppt=sp&ppn=sp&ssid=l3f0en9g8g0000001749372704906&qH=8e0ee2dac8c1afb1
-# ⚠️  Skipping duplicate URL: https://www.flipkart.com/apple-iphone-16-black-128-gb/p/itmb07d67f995271?pid=MOBH4DQFG8NKFRDY&lid=LSTMOBH4DQFG8NKFRDYNBDOZI&marketplace=FLIPKART&q=iPhone+166&store=tyy%2F4io&spotlightTagId=default_BestsellerId_tyy%2F4io&srno=s_1_1&otracker=search&fm=organic&iid=c111715d-0551-4030-9e77-e494ad176729.MOBH4DQFG8NKFRDY.SEARCH&ppt=sp&ppn=sp&ssid=l3f0en9g8g0000001749372704906&qH=8e0ee2dac8c1afb1
-# ✅ Added flipkart product #2: Apple iPhone 16 (Pink, 256 GB)...
-# ⚠️  Skipping duplicate URL: https://www.flipkart.com/apple-iphone-16-pink-256-gb/p/itm0d8c695cded44?pid=MOBH4DQF28XAYM2S&lid=LSTMOBH4DQF28XAYM2S3JPA23&marketplace=FLIPKART&q=iPhone+16&&store=tyy%2F4io&srno=s_1_2&otracker=search&fm=organic&iid=c111715d-0551-4030-9e77-e494ad176729.MOBH4DQF28XAYM2S.SEARCH&ppt=None&ppn=None&ssid=l3f0en9g8g0000001749372704906&qH=8e0ee2dac8c1afb1
-# ✅ Added flipkart product #3: Apple iPhone 16 (Black, 256 GB)...
-# ⚠️  Skipping duplicate URL: https://www.flipkart.com/apple-iphone-16-black-256-gb/p/itm86da1977dcdf1?pid=MOBH4DQFZCJJXUFG&lid=LSTMOBH4DQFZCJJXUFGO5DY3W&marketplace=FLIPKART&q=iPhone+166&store=tyy%2F4io&srno=s_1_3&otracker=search&fm=organic&iid=c111715d-0551-4030-9e77-e494ad176729.MOBH4DQFZCJJXUFG.SEARCH&ppt=None&ppn=None&ssid=l3f0en9g8g0000001749372704906&qH=8e0ee2dac8c1afb1
-# ✅ Added flipkart product #4: Apple iPhone 16 (Teal, 128 GB)...
-# ⚠️  Skipping duplicate URL: https://www.flipkart.com/apple-iphone-16-teal-128-gb/p/itmce4bb3f55cc2f?pid=MOBH4DQFSY9ETDUU&lid=LSTMOBH4DQFSY9ETDUUI6AN3O&marketplace=FLIPKART&q=iPhone+16&&store=tyy%2F4io&srno=s_1_4&otracker=search&fm=organic&iid=c111715d-0551-4030-9e77-e494ad176729.MOBH4DQFSY9ETDUU.SEARCH&ppt=None&ppn=None&ssid=l3f0en9g8g0000001749372704906&qH=8e0ee2dac8c1afb1
-# ✅ Added flipkart product #5: Apple iPhone 16 (White, 128 GB)...
-
-# 📈 SCRAPING SUMMARY:
-#    Amazon products found: 5
-#    Flipkart products found: 5
-#    Total unique listings: 10
-
-# ✅ Found 10 product listings total
-
-# 🚀 Step 2: Scraping detailed information for up to 10 products...
-
-# 📦 Processing product 1/10
-#    Platform: Amazon
-#    Title: iPhone 16 128 GB: 5G Mobile Phone with Camera Control, A18 C...
-# 🔍 Scraping details for: https://www.amazon.in/dp/B0DGJH8RYG...
-# 📱 Platform detected: amazon
-# ✅ Successfully scraped amazon product details
-
-# 📦 Processing product 2/10
-#    Platform: Amazon
-#    Title: iPhone 16 Pro Max 256 GB: 5G Mobile Phone with Camera Contro...
-# 🔍 Scraping details for: https://www.amazon.in/dp/B0DGHYDZR9...
-# 📱 Platform detected: amazon
-# ✅ Successfully scraped amazon product details
-
-# 📦 Processing product 3/10
-#    Platform: Amazon
-#    Title: iPhone 16 128 GB: 5G Mobile Phone with Camera Control, A18 C...
-# 🔍 Scraping details for: https://www.amazon.in/dp/B0DGHZWBYB...
-# 📱 Platform detected: amazon
-# ✅ Successfully scraped amazon product details
-
-# 📦 Processing product 4/10
-#    Platform: Amazon
-#    Title: iPhone 16 128 GB: 5G Mobile Phone with Camera Control, A18 C...
-# 🔍 Scraping details for: https://www.amazon.in/dp/B0DGJHBX5Y...
-# 📱 Platform detected: amazon
-# ✅ Successfully scraped amazon product details
-
-# 📦 Processing product 5/10
-#    Platform: Amazon
-#    Title: iPhone 16 Pro 256 GB: 5G Mobile Phone with Camera Control, 4...
-# 🔍 Scraping details for: https://www.amazon.in/dp/B0DGJC8DG8...
-# 📱 Platform detected: amazon
-# ✅ Successfully scraped amazon product details
-
-# 📦 Processing product 6/10
-#    Platform: Flipkart
-#    Title: Apple iPhone 16 (Black, 128 GB)...
-# 🔍 Scraping details for: https://www.flipkart.com/apple-iphone-16-black-128-gb/p/itmb07d67f995271?pid=MOB...
-# 📱 Platform detected: flipkart
-# ✅ Successfully scraped flipkart product details
-
-# 📦 Processing product 7/10
-#    Platform: Flipkart
-#    Title: Apple iPhone 16 (Pink, 256 GB)...
-# 🔍 Scraping details for: https://www.flipkart.com/apple-iphone-16-pink-256-gb/p/itm0d8c695cded44?pid=MOBH...
-# 📱 Platform detected: flipkart
-# ✅ Successfully scraped flipkart product details
-
-# 📦 Processing product 8/10
-#    Platform: Flipkart
-#    Title: Apple iPhone 16 (Black, 256 GB)...
-# 🔍 Scraping details for: https://www.flipkart.com/apple-iphone-16-black-256-gb/p/itm86da1977dcdf1?pid=MOB...
-# 📱 Platform detected: flipkart
-# ✅ Successfully scraped flipkart product details
-
-# 📦 Processing product 9/10
-#    Platform: Flipkart
-#    Title: Apple iPhone 16 (Teal, 128 GB)...
-# 🔍 Scraping details for: https://www.flipkart.com/apple-iphone-16-teal-128-gb/p/itmce4bb3f55cc2f?pid=MOBH...
-# 📱 Platform detected: flipkart
-# ✅ Successfully scraped flipkart product details
-
-# 📦 Processing product 10/10
-#    Platform: Flipkart
-#    Title: Apple iPhone 16 (White, 128 GB)...
-# 🔍 Scraping details for: https://www.flipkart.com/apple-iphone-16-white-128-gb/p/itm7c0281cd247be?pid=MOB...
-# 📱 Platform detected: flipkart
-# ✅ Successfully scraped flipkart product details
-
-# ================================================================================
-# 📊 FINAL RESULTS SUMMARY
-# ================================================================================
-# 🛒 Amazon products: 5
-# 🛒 Flipkart products: 5
-# 🛒 Total products: 10
-
-# 📱 Sample Amazon product:
-#    Title: iPhone 16 128 GB: 5G Mobile Phone with Camera Control, A18 Chip and a Big Boost in Battery Life. Works with AirPods; Teal
-#    Price: ₹73,500
-#    Detailed scraped: ✅
-
-# 📱 Sample Flipkart product:
-#    Title: Apple iPhone 16 (Black, 128 GB)
-#    Price: ₹74,900
-#    Detailed scraped: ✅
-
-# ================================================================================
-# 📋 FULL RESULTS (JSON)
-# ================================================================================
-# {
-#   "query": "iPhone 16",
-#   "total_listings_found": 10,
-#   "detailed_products_processed": 10,
-#   "products": [
-#     {
-#       "listing_info": {
-#         "title": "iPhone 16 128 GB: 5G Mobile Phone with Camera Control, A18 Chip and a Big Boost in Battery Life. Works with AirPods; Teal",
-#         "price_str": "₹73,500",
-#         "rating_str": "4.4 out of 5 stars",
-#         "url": "https://www.amazon.in/dp/B0DGJH8RYG",
-#         "platform": "Amazon"
-#       },
-#       "detailed_info": {
-#         "platform": "amazon",
-#         "url": "https://www.amazon.in/dp/B0DGJH8RYG",
-#         "data": {
-#           "product_title": "iPhone 16 128 GB: 5G Mobile Phone with Camera Control, A18 Chip and a Big Boost in Battery Life. Works with AirPods; Teal",
-#           "price": "₹73,500.00",
-#           "offers": [
-#             "Upto ₹4,000.00 discount on select Credit Cards",
-#             "Upto ₹3,311.61 EMI interest savings on select Credit Cards",
-#             "Upto ₹2,205.00 cashback as Amazon Pay Balance when you pay with Amazon Pay ICICI Bank Credit Cards",
-#             "Get GST invoice and save up to 28% on business purchases."
-#           ],
-#           "brand": "Apple",
-#           "asin": "B0DGJH8RYG"
-#         }
-#       }
-#     },
-#     {
-#       "listing_info": {
-#         "title": "iPhone 16 Pro Max 256 GB: 5G Mobile Phone with Camera Control, 4K 120 fps Dolby Vision and a Huge Leap in Battery Life. Works with AirPods; Desert Titanium",
-#         "price_str": "₹1,35,900",
-#         "rating_str": "4.3 out of 5 stars",
-#         "url": "https://www.amazon.in/dp/B0DGHYDZR9",
-#         "platform": "Amazon"
-#       },
-#       "detailed_info": {
-#         "platform": "amazon",
-#         "url": "https://www.amazon.in/dp/B0DGHYDZR9",
-#         "data": {
-#           "product_title": "iPhone 16 Pro Max 256 GB: 5G Mobile Phone with Camera Control, 4K 120 fps Dolby Vision and a Huge Leap in Battery Life. Works with AirPods; Desert Titanium",
-#           "price": "₹1,35,900.00",
-#           "offers": [
-#             "Upto ₹6,123.10 EMI interest savings on select Credit Cards",
-#             "Upto ₹3,000.00 discount on select Credit Cards",
-#             "Upto ₹4,077.00 cashback as Amazon Pay Balance when you pay with Amazon Pay ICICI Bank Credit Cards",
-#             "Get GST invoice and save up to 28% on business purchases."
-#           ],
-#           "brand": "Apple",
-#           "asin": "B0DGHYDZR9"
-#         }
-#       }
-#     },
-#     {
-#       "listing_info": {
-#         "title": "iPhone 16 128 GB: 5G Mobile Phone with Camera Control, A18 Chip and a Big Boost in Battery Life. Works with AirPods; White",
-#         "price_str": "₹73,500",
-#         "rating_str": "4.4 out of 5 stars",
-#         "url": "https://www.amazon.in/dp/B0DGHZWBYB",
-#         "platform": "Amazon"
-#       },
-#       "detailed_info": {
-#         "platform": "amazon",
-#         "url": "https://www.amazon.in/dp/B0DGHZWBYB",
-#         "data": {
-#           "product_title": "iPhone 16 128 GB: 5G Mobile Phone with Camera Control, A18 Chip and a Big Boost in Battery Life. Works with AirPods; White",
-#           "price": "₹73,500.00",
-#           "offers": [
-#             "Upto ₹4,000.00 discount on select Credit Cards",
-#             "Upto ₹3,311.61 EMI interest savings on select Credit Cards",
-#             "Upto ₹2,205.00 cashback as Amazon Pay Balance when you pay with Amazon Pay ICICI Bank Credit Cards",
-#             "Get GST invoice and save up to 28% on business purchases."
-#           ],
-#           "brand": "Apple",
-#           "asin": "B0DGHZWBYB"
-#         }
-#       }
-#     },
-#     {
-#       "listing_info": {
-#         "title": "iPhone 16 128 GB: 5G Mobile Phone with Camera Control, A18 Chip and a Big Boost in Battery Life. Works with AirPods; Black",
-#         "price_str": "₹73,500",
-#         "rating_str": "4.4 out of 5 stars",
-#         "url": "https://www.amazon.in/dp/B0DGJHBX5Y",
-#         "platform": "Amazon"
-#       },
-#       "detailed_info": {
-#         "platform": "amazon",
-#         "url": "https://www.amazon.in/dp/B0DGJHBX5Y",
-#         "data": {
-#           "product_title": "iPhone 16 128 GB: 5G Mobile Phone with Camera Control, A18 Chip and a Big Boost in Battery Life. Works with AirPods; Black",
-#           "price": "₹73,500.00",
-#           "offers": [
-#             "Upto ₹4,000.00 discount on select Credit Cards",
-#             "Upto ₹3,311.61 EMI interest savings on select Credit Cards",
-#             "Upto ₹2,205.00 cashback as Amazon Pay Balance when you pay with Amazon Pay ICICI Bank Credit Cards",
-#             "Get GST invoice and save up to 28% on business purchases."
-#           ],
-#           "brand": "Apple",
-#           "asin": "B0DGJHBX5Y"
-#         }
-#       }
-#     },
-#     {
-#       "listing_info": {
-#         "title": "iPhone 16 Pro 256 GB: 5G Mobile Phone with Camera Control, 4K 120 fps Dolby Vision and a Huge Leap in Battery Life. Works with AirPods; Black Titanium",
-#         "price_str": "₹1,22,900",
-#         "rating_str": "4.4 out of 5 stars",
-#         "url": "https://www.amazon.in/dp/B0DGJC8DG8",
-#         "platform": "Amazon"
-#       },
-#       "detailed_info": {
-#         "platform": "amazon",
-#         "url": "https://www.amazon.in/dp/B0DGJC8DG8",
-#         "data": {
-#           "product_title": "iPhone 16 Pro 256 GB: 5G Mobile Phone with Camera Control, 4K 120 fps Dolby Vision and a Huge Leap in Battery Life. Works with AirPods; Black Titanium",    
-#           "price": "₹1,22,900.00",
-#           "offers": [
-#             "Upto ₹3,000.00 discount on select Credit Cards",
-#             "Upto ₹5,537.39 EMI interest savings on select Credit Cards",
-#             "Upto ₹3,687.00 cashback as Amazon Pay Balance when you pay with Amazon Pay ICICI Bank Credit Cards",
-#             "Get GST invoice and save up to 28% on business purchases."
-#           ],
-#           "brand": "Apple",
-#           "asin": "B0DGJC8DG8"
-#         }
-#       }
-#     },
-#     {
-#       "listing_info": {
-#         "title": "Apple iPhone 16 (Black, 128 GB)",
-#         "price_str": "₹74,900",
-#         "rating_str": null,
-#         "url": "https://www.flipkart.com/apple-iphone-16-black-128-gb/p/itmb07d67f995271?pid=MOBH4DQFG8NKFRDY&lid=LSTMOBH4DQFG8NKFRDYNBDOZI&marketplace=FLIPKART&q=iPhone+16&store=tyy%2F4io&spotlightTagId=default_BestsellerId_tyy%2F4io&srno=s_1_1&otracker=search&fm=organic&iid=c111715d-0551-4030-9e77-e494ad176729.MOBH4DQFG8NKFRDY.SEARCH&ppt=sp&ppn=sp&ssid=l3f0en9g8g0000001749372704906&qH=8e0ee2dac8c1afb1",
-#         "platform": "Flipkart"
-#       },
-#       "detailed_info": {
-#         "platform": "flipkart",
-#         "url": "https://www.flipkart.com/apple-iphone-16-black-128-gb/p/itmb07d67f995271?pid=MOBH4DQFG8NKFRDY&lid=LSTMOBH4DQFG8NKFRDYNBDOZI&marketplace=FLIPKART&q=iPhone+16&store=tyy%2F4io&spotlightTagId=default_BestsellerId_tyy%2F4io&srno=s_1_1&otracker=search&fm=organic&iid=c111715d-0551-4030-9e77-e494ad176729.MOBH4DQFG8NKFRDY.SEARCH&ppt=sp&ppn=sp&ssid=l3f0en9g8g0000001749372704906&qH=8e0ee2dac8c1afb1",
-#         "data": {
-#           "product_title": "Apple iPhone 16 (Black, 128 GB)",
-#           "price": "₹74,900",
-#           "original_price": "₹79,900",
-#           "discount": "6% off",
-#           "offers": [
-#             "5% Unlimited Cashback on Flipkart Axis Bank Credit Card",
-#             "₹2500 Off On Flipkart Axis Bank Credit Card Non EMI Transactions.",
-#             "₹4000 Off On All Banks Credit Card Transactions.",
-#             "Get extra ₹5000 off (price inclusive of cashback/coupon)"
-#           ],
-#           "brand": "Apple",
-#           "rating": "4.6",
-#           "reviews_count": "725"
-#         }
-#       }
-#     },
-#     {
-#       "listing_info": {
-#         "title": "Apple iPhone 16 (Pink, 256 GB)",
-#         "price_str": "₹84,900",
-#         "rating_str": null,
-#         "url": "https://www.flipkart.com/apple-iphone-16-pink-256-gb/p/itm0d8c695cded44?pid=MOBH4DQF28XAYM2S&lid=LSTMOBH4DQF28XAYM2S3JPA23&marketplace=FLIPKART&q=iPhone+16&store=tyy%2F4io&srno=s_1_2&otracker=search&fm=organic&iid=c111715d-0551-4030-9e77-e494ad176729.MOBH4DQF28XAYM2S.SEARCH&ppt=None&ppn=None&ssid=l3f0en9g8g0000001749372704906&qH=8e0ee2dac8c1afb1",   
-#         "platform": "Flipkart"
-#       },
-#       "detailed_info": {
-#         "platform": "flipkart",
-#         "url": "https://www.flipkart.com/apple-iphone-16-pink-256-gb/p/itm0d8c695cded44?pid=MOBH4DQF28XAYM2S&lid=LSTMOBH4DQF28XAYM2S3JPA23&marketplace=FLIPKART&q=iPhone+16&store=tyy%2F4io&srno=s_1_2&otracker=search&fm=organic&iid=c111715d-0551-4030-9e77-e494ad176729.MOBH4DQF28XAYM2S.SEARCH&ppt=None&ppn=None&ssid=l3f0en9g8g0000001749372704906&qH=8e0ee2dac8c1afb1",   
-#         "data": {
-#           "product_title": "Apple iPhone 16 (Pink, 256 GB)",
-#           "price": "₹84,900",
-#           "original_price": "₹89,900",
-#           "discount": "5% off",
-#           "offers": [
-#             "5% Unlimited Cashback on Flipkart Axis Bank Credit Card",
-#             "₹2500 Off On Flipkart Axis Bank Credit Card Non EMI Transactions.",
-#             "₹4000 Off On All Banks Credit Card Transactions.",
-#             "Get extra ₹5000 off (price inclusive of cashback/coupon)"
-#           ],
-#           "brand": "Apple",
-#           "rating": "4.6",
-#           "reviews_count": "17,203 Ratings & 725 Reviews"
-#         }
-#       }
-#     },
-#     {
-#       "listing_info": {
-#         "title": "Apple iPhone 16 (Black, 256 GB)",
-#         "price_str": "₹84,900",
-#         "rating_str": null,
-#         "url": "https://www.flipkart.com/apple-iphone-16-black-256-gb/p/itm86da1977dcdf1?pid=MOBH4DQFZCJJXUFG&lid=LSTMOBH4DQFZCJJXUFGO5DY3W&marketplace=FLIPKART&q=iPhone+16&store=tyy%2F4io&srno=s_1_3&otracker=search&fm=organic&iid=c111715d-0551-4030-9e77-e494ad176729.MOBH4DQFZCJJXUFG.SEARCH&ppt=None&ppn=None&ssid=l3f0en9g8g0000001749372704906&qH=8e0ee2dac8c1afb1",  
-#         "platform": "Flipkart"
-#       },
-#       "detailed_info": {
-#         "platform": "flipkart",
-#         "url": "https://www.flipkart.com/apple-iphone-16-black-256-gb/p/itm86da1977dcdf1?pid=MOBH4DQFZCJJXUFG&lid=LSTMOBH4DQFZCJJXUFGO5DY3W&marketplace=FLIPKART&q=iPhone+16&store=tyy%2F4io&srno=s_1_3&otracker=search&fm=organic&iid=c111715d-0551-4030-9e77-e494ad176729.MOBH4DQFZCJJXUFG.SEARCH&ppt=None&ppn=None&ssid=l3f0en9g8g0000001749372704906&qH=8e0ee2dac8c1afb1",  
-#         "data": {
-#           "product_title": "Apple iPhone 16 (Black, 256 GB)",
-#           "price": "₹84,900",
-#           "original_price": "₹89,900",
-#           "discount": "5% off",
-#           "offers": [
-#             "5% Unlimited Cashback on Flipkart Axis Bank Credit Card",
-#             "₹2500 Off On Flipkart Axis Bank Credit Card Non EMI Transactions.",
-#             "₹4000 Off On All Banks Credit Card Transactions.",
-#             "Get extra ₹5000 off (price inclusive of cashback/coupon)"
-#           ],
-#           "brand": "Apple",
-#           "rating": "4.6",
-#           "reviews_count": "17,203"
-#         }
-#       }
-#     },
-#     {
-#       "listing_info": {
-#         "title": "Apple iPhone 16 (Teal, 128 GB)",
-#         "price_str": "₹74,900",
-#         "rating_str": null,
-#         "url": "https://www.flipkart.com/apple-iphone-16-teal-128-gb/p/itmce4bb3f55cc2f?pid=MOBH4DQFSY9ETDUU&lid=LSTMOBH4DQFSY9ETDUUI6AN3O&marketplace=FLIPKART&q=iPhone+16&store=tyy%2F4io&srno=s_1_4&otracker=search&fm=organic&iid=c111715d-0551-4030-9e77-e494ad176729.MOBH4DQFSY9ETDUU.SEARCH&ppt=None&ppn=None&ssid=l3f0en9g8g0000001749372704906&qH=8e0ee2dac8c1afb1",   
-#         "platform": "Flipkart"
-#       },
-#       "detailed_info": {
-#         "platform": "flipkart",
-#         "url": "https://www.flipkart.com/apple-iphone-16-teal-128-gb/p/itmce4bb3f55cc2f?pid=MOBH4DQFSY9ETDUU&lid=LSTMOBH4DQFSY9ETDUUI6AN3O&marketplace=FLIPKART&q=iPhone+16&store=tyy%2F4io&srno=s_1_4&otracker=search&fm=organic&iid=c111715d-0551-4030-9e77-e494ad176729.MOBH4DQFSY9ETDUU.SEARCH&ppt=None&ppn=None&ssid=l3f0en9g8g0000001749372704906&qH=8e0ee2dac8c1afb1",   
-#         "data": {
-#           "product_title": "Apple iPhone 16 (Teal, 128 GB)",
-#           "price": "₹74,900",
-#           "original_price": "₹79,900",
-#           "discount": "6% off",
-#           "offers": [
-#             "5% Unlimited Cashback on Flipkart Axis Bank Credit Card",
-#             "₹2500 Off On Flipkart Axis Bank Credit Card Non EMI Transactions.",
-#             "₹4000 Off On All Banks Credit Card Transactions.",
-#             "Get extra ₹5000 off (price inclusive of cashback/coupon)"
-#           ],
-#           "brand": "Apple",
-#           "rating": "4.6",
-#           "reviews_count": "17,203 Ratings & 725 Reviews"
-#         }
-#       }
-#     },
-#     {
-#       "listing_info": {
-#         "title": "Apple iPhone 16 (White, 128 GB)",
-#         "price_str": "₹74,900",
-#         "rating_str": null,
-#         "url": "https://www.flipkart.com/apple-iphone-16-white-128-gb/p/itm7c0281cd247be?pid=MOBH4DQF849HCG6G&lid=LSTMOBH4DQF849HCG6GXHBPXY&marketplace=FLIPKART&q=iPhone+16&store=tyy%2        "url": "https://www.flipkart.com/apple-iphone-16-white-128-gb/p/itm7c0281cd247be?pid=MOBH4DQF849HCG6G&lid=LSTMOBH4DQF849HCG6GXHBPXY&marketplace=FLIPKART&q=iPhone+16&store=tyy%2F4io&spotlightTagId=default_BestsellerId_tyy%2F4io&srno=s_1_5&otracker=search&fm=organic&iid=c111715d-0551-4030-9e77-e494ad176729.MOBH4DQF849HCG6G.SEARCH&ppt=sp&ppn=sp&ssid=l3f0en9g8g0000001749372704906&qH=8e0ee2dac8c1afb1",
-#         "platform": "Flipkart"
-# 000001749372704906&qH=8e0ee2dac8c1afb1",
-#         "platform": "Flipkart"
-#       },
-#         "platform": "Flipkart"
-#       },
-#       },
-#       "detailed_info": {
-#       "detailed_info": {
-#         "platform": "flipkart",
-#         "platform": "flipkart",
-#         "url": "https://www.flipkart.com/apple-iphone-16-white-128-gb/p/itm7c0281cd247be?pid=MOBH4DQF849HCG6G&lid=LSTMOBH4DQF849HCG6GXHBPXY&marketplace=FLIPKART&q=iPhone+16&store=tyy%2        "url": "https://www.flipkart.com/apple-iphone-16-white-128-gb/p/itm7c0281cd247be?pid=MOBH4DQF849HCG6G&lid=LSTMOBH4DQF849HCG6GXHBPXY&marketplace=FLIPKART&q=iPhone+16&store=tyy%2F4io&spotlightTagId=default_BestsellerId_tyy%2F4io&srno=s_1_5&otracker=search&fm=organic&iid=c111715d-0551-4030-9e77-e494ad176729.MOBH4DQF849HCG6G.SEARCH&ppt=sp&ppn=sp&ssid=l3f0en9g8g0F4io&spotlightTagId=default_BestsellerId_tyy%2F4io&srno=s_1_5&otracker=search&fm=organic&iid=c111715d-0551-4030-9e77-e494ad176729.MOBH4DQF849HCG6G.SEARCH&ppt=sp&ppn=sp&ssid=l3f0en9g8g0000001749372704906&qH=8e0ee2dac8c1afb1",
-#         "data": {
-#           "product_title": "Apple iPhone 16 (White, 128 GB)",
-#           "price": "₹74,900",
-#           "original_price": "₹79,900",
-#           "discount": "6% off",
-#           "offers": [
-#             "5% Unlimited Cashback on Flipkart Axis Bank Credit Card",
-#             "₹2500 Off On Flipkart Axis Bank Credit Card Non EMI Transactions.",
-#             "₹4000 Off On All Banks Credit Card Transactions.",
-#             "Get extra ₹5000 off (price inclusive of cashback/coupon)"
-#           ],
-#           "brand": "Apple",
-#           "rating": "4.6",
-#           "reviews_count": "725"
-#         }
-#       }
-#     }
-#   ]
-# }
-# 💾 Results saved to product_results.json
+    print(asyncio.run(run_product_pipeline("iPhone 16", 2)))
