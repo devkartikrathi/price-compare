@@ -39,7 +39,6 @@ class HealthCheck(BaseModel):
 
 @app.get("/", response_model=HealthCheck)
 async def root():
-    """Health check endpoint"""
     return HealthCheck(
         status="healthy",
         timestamp=datetime.now().isoformat(),
@@ -51,7 +50,8 @@ async def analyze_prices(request: PriceAnalysisRequest):
     return await analyze_product_prices(
         product_query=request.product_query,
         user_credit_cards=request.user_credit_cards,
-        max_products_per_platform=request.max_products_per_platform
+        # max_products_per_platform=request.max_products_per_platform
+        max_products_per_platform=2
     )
 
 @app.get("/supported-cards")
@@ -80,7 +80,6 @@ async def get_supported_cards():
 
 @app.get("/platforms")
 async def get_supported_platforms():
-    """Get list of supported e-commerce platforms"""
     return {
         "platforms": [
             "Amazon",
