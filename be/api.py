@@ -94,6 +94,19 @@ async def get_supported_platforms():
         ],
         "note": "The scraper will automatically search across available platforms based on product category."
     }
+    
+@app.get("/grocery-stores")
+async def get_grocery_stores():
+    return {
+        "grocery_stores": [
+            "BigBasket",
+            "Blinkit",
+            "Zepto",
+            "Swiggy",
+            "Grofers"
+        ],
+        "note": "The scraper will automatically search across available grocery stores based on product category."
+    }
 
 if __name__ == "__main__":
     import uvicorn
