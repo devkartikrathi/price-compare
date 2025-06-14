@@ -42,7 +42,6 @@ class GenericProduct(BaseModel):
     reviews_count: str = Field(description="Number of reviews/ratings", default="")
     availability: str = Field(description="Product availability status", default="")
 
-# CSS selectors for different platforms
 amazon_css_listing_schema = {
     "name": "AmazonProductListing",
     "baseSelector": 'div[data-component-type="s-search-result"], div[data-asin]',
@@ -77,51 +76,6 @@ bigbasket_css_listing_schema = {
     ]
 }
 
-blinkit_css_listing_schema = {
-    "name": "BlinkitProductListing",
-    "baseSelector": 'div[data-testid="plp-product"], .Product__UpdatedC, .ProductPod, div.css-1of2wjo',
-    "fields": [
-        {"name": "title", "selector": ".Product__UpdatedProductTitle, .ProductPod__productName, .css-1c4d9c0, .css-16ny8c6", "type": "text", "optional": True},
-        {"name": "price", "selector": ".Product__UpdatedPrice, .ProductPod__price, .css-1kbz84u, .css-1p6zl5q", "type": "text", "optional": True},
-        {"name": "original_price", "selector": ".Product__UpdatedStrikedPrice, .ProductPod__strikeThroughPrice, .css-12rfzbx", "type": "text", "optional": True},
-        {"name": "url", "selector": 'a', "type": "attribute", "attribute": "href", "optional": True}
-    ]
-}
-
-zepto_css_listing_schema = {
-    "name": "ZeptoProductListing",
-    "baseSelector": '.css-79elbk, .css-1b4d9k7, div[data-testid="product-card"]',
-    "fields": [
-        {"name": "title", "selector": ".css-1w8ee6h, .css-1no0p6n, h3", "type": "text", "optional": True},
-        {"name": "price", "selector": ".css-1lx8n8m, .css-1u8zkwz, .price", "type": "text", "optional": True},
-        {"name": "original_price", "selector": ".css-1qb0j9l, .strike-price", "type": "text", "optional": True},
-        {"name": "url", "selector": 'a', "type": "attribute", "attribute": "href", "optional": True}
-    ]
-}
-
-swiggy_css_listing_schema = {
-    "name": "SwiggyProductListing",
-    "baseSelector": 'div[data-testid="normal-instamart-item"], .styles_itemContainer, .product-item',
-    "fields": [
-        {"name": "title", "selector": '.styles_itemNameText, .product-title, h3', "type": "text", "optional": True},
-        {"name": "price", "selector": '.styles_priceDisplay, .product-price, .price', "type": "text", "optional": True},
-        {"name": "original_price", "selector": '.styles_originalPrice, .strike-price', "type": "text", "optional": True},
-        {"name": "url", "selector": 'a', "type": "attribute", "attribute": "href", "optional": True}
-    ]
-}
-
-myntra_css_listing_schema = {
-    "name": "MyntraProductListing",
-    "baseSelector": '.product-base, .product-productMetaInfo, li.product-base',
-    "fields": [
-        {"name": "title", "selector": '.product-product, .product-brand, h3, h4', "type": "text", "optional": True},
-        {"name": "price", "selector": '.product-discountedPrice, .product-price, .price', "type": "text", "optional": True},
-        {"name": "original_price", "selector": '.product-strike, .strike-price', "type": "text", "optional": True},
-        {"name": "rating", "selector": '.product-rating, .rating', "type": "text", "optional": True},
-        {"name": "url", "selector": 'a', "type": "attribute", "attribute": "href", "optional": True}
-    ]
-}
-
 browser_config = BrowserConfig(
     headless=True,
     viewport_width=1920,
@@ -139,14 +93,6 @@ def detect_platform(url: str) -> str:
         return "flipkart"
     elif "bigbasket." in url_lower:
         return "bigbasket"
-    elif "blinkit." in url_lower or "grofers." in url_lower:
-        return "blinkit"
-    elif "zepto." in url_lower:
-        return "zepto"
-    elif "swiggy." in url_lower and "instamart" in url_lower:
-        return "swiggy"
-    elif "myntra." in url_lower:
-        return "myntra"
     else:
         return "unknown"
 
@@ -195,26 +141,6 @@ async def scrape_product_listings(product_query: str, max_products_per_platform:
         #     "search_url": f"https://www.bigbasket.com/ps/?q={product_query.replace(' ', '%20')}",
         #     "base_url": "https://www.bigbasket.com",
         #     "schema": bigbasket_css_listing_schema
-        # },
-        # "blinkit": {
-        #     "search_url": f"https://blinkit.com/s/?q={product_query.replace(' ', '%20')}",
-        #     "base_url": "https://blinkit.com",
-        #     "schema": blinkit_css_listing_schema
-        # },
-        # "zepto": {
-        #     "search_url": f"https://www.zepto.com/search?query={product_query.replace(' ', '%20')}",
-        #     "base_url": "https://www.zepto.com",
-        #     "schema": zepto_css_listing_schema
-        # },
-        # "swiggy": {
-        #     "search_url": f"https://www.swiggy.com/instamart/search?custom_back=true&query={product_query.replace(' ', '%20')}",
-        #     "base_url": "https://www.swiggy.com",
-        #     "schema": swiggy_css_listing_schema
-        # },
-        # "myntra": {
-        #     "search_url": f"https://www.myntra.com/{product_query.replace(' ', '-')}",
-        #     "base_url": "https://www.myntra.com",
-        #     "schema": myntra_css_listing_schema
         # }
     }
 

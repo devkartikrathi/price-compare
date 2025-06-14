@@ -1,4 +1,4 @@
-const API_BASE_URL = '/api';
+const API_BASE_URL = 'https://smartprice.logikxmind.com';
 
 export class ApiService {
   static async analyzeProductPrices(request: {
