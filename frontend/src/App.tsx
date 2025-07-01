@@ -1,17 +1,19 @@
-import React, { useState } from 'react';
-import { ShoppingCart, Sparkles, CreditCard } from 'lucide-react';
-import { SearchForm } from './components/SearchForm';
-import { ResultsSection } from './components/ResultsSection';
-import { LoadingState } from './components/LoadingState';
-import { ErrorState } from './components/ErrorState';
-import { ApiService } from './services/api';
-import { Product } from './types';
+import React, { useState } from "react";
+import { ShoppingCart, Sparkles, CreditCard } from "lucide-react";
+import { SearchForm } from "./components/SearchForm";
+import { ResultsSection } from "./components/ResultsSection";
+import { LoadingState } from "./components/LoadingState";
+import { ErrorState } from "./components/ErrorState";
+import { ApiService } from "./services/api";
+import { Product, PriceAnalysisResponse } from "./types";
 
 function App() {
   const [products, setProducts] = useState<Product[]>([]);
+  const [searchResponse, setSearchResponse] =
+    useState<PriceAnalysisResponse | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [searchQuery, setSearchQuery] = useState<string>('');
+  const [searchQuery, setSearchQuery] = useState<string>("");
   const [hasSearched, setHasSearched] = useState(false);
 
   const handleSearch = async (query: string, creditCards: string[]) => {
@@ -21,15 +23,19 @@ function App() {
     setHasSearched(true);
 
     try {
-      const response = await ApiService.analyzeProductPrices({
-        product_query: query,
-        user_credit_cards: creditCards,
-        max_products_per_platform: 5,
-      });
+      const response: PriceAnalysisResponse =
+        await ApiService.analyzeProductPrices({
+          product_query: query,
+          user_credit_cards: creditCards,
+          max_products_per_platform: 5,
+        });
 
       setProducts(response.products || []);
+      setSearchResponse(response);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'An unexpected error occurred');
+      setError(
+        err instanceof Error ? err.message : "An unexpected error occurred"
+      );
     } finally {
       setIsLoading(false);
     }
@@ -39,6 +45,7 @@ function App() {
     setError(null);
     setHasSearched(false);
     setProducts([]);
+    setSearchResponse(null);
   };
 
   return (
@@ -56,10 +63,13 @@ function App() {
                 Smart<span className="text-yellow-300">Price</span>
               </h1>
             </div>
-            
+
             <p className="text-xl sm:text-2xl font-light mb-8 max-w-3xl mx-auto leading-relaxed">
-              Find the best deals across e-commerce platforms with 
-              <span className="font-semibold text-yellow-300"> credit card optimization</span>
+              Find the best deals across e-commerce platforms with
+              <span className="font-semibold text-yellow-300">
+                {" "}
+                credit card optimization
+              </span>
             </p>
 
             <div className="flex flex-col sm:flex-row items-center justify-center gap-6 text-sm sm:text-base">
@@ -90,13 +100,15 @@ function App() {
         {/* Content Area */}
         <div className="max-w-7xl mx-auto">
           {isLoading && <LoadingState />}
-          
-          {error && (
-            <ErrorState error={error} onRetry={handleRetry} />
-          )}
+
+          {error && <ErrorState error={error} onRetry={handleRetry} />}
 
           {!isLoading && !error && hasSearched && (
-            <ResultsSection products={products} searchQuery={searchQuery} />
+            <ResultsSection
+              products={products}
+              searchQuery={searchQuery}
+              searchResponse={searchResponse}
+            />
           )}
 
           {!hasSearched && !isLoading && !error && (
@@ -108,28 +120,41 @@ function App() {
                 Ready to find amazing deals?
               </h3>
               <p className="text-gray-600 max-w-md mx-auto mb-8">
-                Search for any product and select your credit cards to discover the best prices with optimized savings.
+                Search for any product and select your credit cards to discover
+                the best prices with optimized savings.
               </p>
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-6 max-w-2xl mx-auto">
                 <div className="text-center p-4">
                   <div className="w-12 h-12 bg-indigo-100 rounded-lg flex items-center justify-center mx-auto mb-3">
                     <span className="text-xl font-bold text-indigo-600">1</span>
                   </div>
-                  <h4 className="font-semibold text-gray-900 mb-1">Search Product</h4>
-                  <p className="text-sm text-gray-600">Enter what you want to buy</p>
+                  <h4 className="font-semibold text-gray-900 mb-1">
+                    Search Product
+                  </h4>
+                  <p className="text-sm text-gray-600">
+                    Enter what you want to buy
+                  </p>
                 </div>
                 <div className="text-center p-4">
                   <div className="w-12 h-12 bg-purple-100 rounded-lg flex items-center justify-center mx-auto mb-3">
                     <span className="text-xl font-bold text-purple-600">2</span>
                   </div>
-                  <h4 className="font-semibold text-gray-900 mb-1">Select Cards</h4>
-                  <p className="text-sm text-gray-600">Choose your credit cards</p>
+                  <h4 className="font-semibold text-gray-900 mb-1">
+                    Select Cards
+                  </h4>
+                  <p className="text-sm text-gray-600">
+                    Choose your credit cards
+                  </p>
                 </div>
                 <div className="text-center p-4">
                   <div className="w-12 h-12 bg-emerald-100 rounded-lg flex items-center justify-center mx-auto mb-3">
-                    <span className="text-xl font-bold text-emerald-600">3</span>
+                    <span className="text-xl font-bold text-emerald-600">
+                      3
+                    </span>
                   </div>
-                  <h4 className="font-semibold text-gray-900 mb-1">Get Best Deal</h4>
+                  <h4 className="font-semibold text-gray-900 mb-1">
+                    Get Best Deal
+                  </h4>
                   <p className="text-sm text-gray-600">See optimized prices</p>
                 </div>
               </div>
@@ -147,7 +172,8 @@ function App() {
               <span className="text-xl font-bold">SmartPrice</span>
             </div>
             <p className="text-gray-400 max-w-md mx-auto">
-              Your intelligent shopping companion for finding the best deals with credit card optimization.
+              Your intelligent shopping companion for finding the best deals
+              with credit card optimization.
             </p>
           </div>
           <div className="mt-8 pt-8 border-t border-gray-800 text-center text-gray-400 text-sm">

@@ -137,11 +137,11 @@ async def scrape_product_listings(product_query: str, max_products_per_platform:
             "base_url": "https://www.flipkart.com",
             "schema": flipkart_css_listing_schema
         },
-        # "bigbasket": {
-        #     "search_url": f"https://www.bigbasket.com/ps/?q={product_query.replace(' ', '%20')}",
-        #     "base_url": "https://www.bigbasket.com",
-        #     "schema": bigbasket_css_listing_schema
-        # }
+        "bigbasket": {
+            "search_url": f"https://www.bigbasket.com/ps/?q={product_query.replace(' ', '%20')}",
+            "base_url": "https://www.bigbasket.com",
+            "schema": bigbasket_css_listing_schema
+        }
     }
 
     listings = []
@@ -241,4 +241,4 @@ async def run_product_pipeline(product_query: str = "iPhone 16", max_products_pe
     return clean_data_for_json(final_result)
 
 if __name__ == "__main__":
-    print(asyncio.run(run_product_pipeline("iPhone 16", 2)))
+    print(asyncio.run(run_product_pipeline("iPhone 15 128GB", 2)))

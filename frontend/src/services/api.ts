@@ -1,4 +1,5 @@
 const API_BASE_URL = 'https://smartprice.logikxmind.com';
+// const API_BASE_URL = 'http://localhost:8000';
 
 export class ApiService {
   static async analyzeProductPrices(request: {

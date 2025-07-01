@@ -1,17 +1,27 @@
-import React from 'react';
-import { ExternalLink, CreditCard, TrendingDown, Star } from 'lucide-react';
-import { Product } from '../types';
+import React from "react";
+import {
+  ExternalLink,
+  CreditCard,
+  TrendingDown,
+  Star,
+  DollarSign,
+  Percent,
+} from "lucide-react";
+import { Product } from "../types";
 
 interface ProductCardProps {
   product: Product;
   isBestDeal?: boolean;
 }
 
-export const ProductCard: React.FC<ProductCardProps> = ({ product, isBestDeal }) => {
+export const ProductCard: React.FC<ProductCardProps> = ({
+  product,
+  isBestDeal,
+}) => {
   const formatPrice = (price: number) => {
-    return new Intl.NumberFormat('en-IN', {
-      style: 'currency',
-      currency: 'INR',
+    return new Intl.NumberFormat("en-IN", {
+      style: "currency",
+      currency: "INR",
       maximumFractionDigits: 0,
     }).format(price);
   };
@@ -22,24 +32,28 @@ export const ProductCard: React.FC<ProductCardProps> = ({ product, isBestDeal })
 
   const getPlatformColor = (platform: string) => {
     const colors: { [key: string]: string } = {
-      'Amazon': 'bg-yellow-500',
-      'Flipkart': 'bg-blue-500',
-      'Myntra': 'bg-pink-500',
-      'BigBasket': 'bg-green-500',
-      'Bigbasket': 'bg-green-500',
-      'Blinkit': 'bg-yellow-600',
-      'Zepto': 'bg-purple-500',
-      'Swiggy': 'bg-orange-500',
-      'Nykaa': 'bg-pink-600',
-      'FirstCry': 'bg-blue-400',
+      Amazon: "bg-yellow-500",
+      Flipkart: "bg-blue-500",
+      Myntra: "bg-pink-500",
+      BigBasket: "bg-green-500",
+      Bigbasket: "bg-green-500",
+      Blinkit: "bg-yellow-600",
+      Zepto: "bg-purple-500",
+      Swiggy: "bg-orange-500",
+      Nykaa: "bg-pink-600",
+      FirstCry: "bg-blue-400",
     };
-    return colors[platform] || 'bg-gray-500';
+    return colors[platform] || "bg-gray-500";
   };
 
   return (
-    <div className={`bg-white rounded-xl shadow-lg hover:shadow-xl transition-all duration-300 border-2 ${
-      isBestDeal ? 'border-emerald-400 ring-2 ring-emerald-100' : 'border-gray-100 hover:border-indigo-200'
-    } group relative overflow-hidden`}>
+    <div
+      className={`bg-white rounded-xl shadow-lg hover:shadow-xl transition-all duration-300 border-2 ${
+        isBestDeal
+          ? "border-emerald-400 ring-2 ring-emerald-100"
+          : "border-gray-100 hover:border-indigo-200"
+      } group relative overflow-hidden`}
+    >
       {/* Best Deal Badge */}
       {isBestDeal && (
         <div className="absolute top-0 right-0 bg-gradient-to-r from-emerald-500 to-green-500 text-white px-4 py-1 rounded-bl-xl font-semibold text-sm flex items-center gap-1">
@@ -50,7 +64,11 @@ export const ProductCard: React.FC<ProductCardProps> = ({ product, isBestDeal })
 
       {/* Platform Badge */}
       <div className="absolute top-4 left-4 z-10">
-        <span className={`${getPlatformColor(product.platform)} text-white px-3 py-1 rounded-full text-sm font-semibold shadow-lg`}>
+        <span
+          className={`${getPlatformColor(
+            product.platform
+          )} text-white px-3 py-1 rounded-full text-sm font-semibold shadow-lg`}
+        >
           {product.platform}
         </span>
       </div>
@@ -65,15 +83,21 @@ export const ProductCard: React.FC<ProductCardProps> = ({ product, isBestDeal })
         <div className="space-y-3 mb-6">
           <div className="flex items-baseline justify-between">
             <div>
-              <p className="text-2xl font-bold text-gray-900">{formatPrice(product.effective_price)}</p>
+              <p className="text-2xl font-bold text-gray-900">
+                {formatPrice(product.effective_price)}
+              </p>
               {product.total_discount > 0 && (
-                <p className="text-sm text-gray-500 line-through">{formatPrice(product.original_price)}</p>
+                <p className="text-sm text-gray-500 line-through">
+                  {formatPrice(product.original_price)}
+                </p>
               )}
             </div>
             {product.savings_percentage > 0 && (
               <div className="flex items-center gap-1 bg-green-100 text-green-800 px-2 py-1 rounded-lg">
                 <TrendingDown className="w-4 h-4" />
-                <span className="font-semibold text-sm">{formatSavings(product.savings_percentage)}% OFF</span>
+                <span className="font-semibold text-sm">
+                  {formatSavings(product.savings_percentage)}% OFF
+                </span>
               </div>
             )}
           </div>
@@ -90,9 +114,58 @@ export const ProductCard: React.FC<ProductCardProps> = ({ product, isBestDeal })
           <div className="bg-indigo-50 border border-indigo-200 rounded-lg p-4 mb-4">
             <div className="flex items-start gap-2">
               <CreditCard className="w-5 h-5 text-indigo-600 mt-0.5 flex-shrink-0" />
-              <div>
-                <p className="font-semibold text-indigo-900 text-sm mb-1">{product.recommended_card}</p>
-                <p className="text-indigo-700 text-sm">{product.card_benefit_description}</p>
+              <div className="flex-1">
+                <p className="font-semibold text-indigo-900 text-sm mb-1">
+                  {product.recommended_card}
+                </p>
+                <p className="text-indigo-700 text-sm mb-2">
+                  {product.card_benefit_description}
+                </p>
+
+                {/* Cashback Information */}
+                <div className="bg-white rounded-lg p-3 space-y-2">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-1">
+                      <DollarSign className="w-4 h-4 text-green-600" />
+                      <span className="text-sm font-medium text-gray-700">
+                        Cashback Earned:
+                      </span>
+                    </div>
+                    <span className="font-bold text-green-600">
+                      {formatPrice(
+                        product.credit_card_benefits.cashback_earned
+                      )}
+                    </span>
+                  </div>
+
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-1">
+                      <Percent className="w-4 h-4 text-blue-600" />
+                      <span className="text-sm font-medium text-gray-700">
+                        Cashback Rate:
+                      </span>
+                    </div>
+                    <span className="font-bold text-blue-600">
+                      {product.credit_card_benefits.effective_cashback_rate}%
+                    </span>
+                  </div>
+
+                  <div className="flex items-center justify-between">
+                    <span className="text-sm font-medium text-gray-700">
+                      Total Value Benefit:
+                    </span>
+                    <span className="font-bold text-indigo-600">
+                      {formatPrice(
+                        product.credit_card_benefits.total_value_benefit
+                      )}
+                    </span>
+                  </div>
+                </div>
+
+                {/* Points Calculation Breakdown */}
+                <div className="mt-2 p-2 bg-gray-50 rounded text-xs text-gray-600">
+                  {product.points_calculation_breakdown}
+                </div>
               </div>
             </div>
           </div>
@@ -102,15 +175,17 @@ export const ProductCard: React.FC<ProductCardProps> = ({ product, isBestDeal })
         <div className="flex items-center justify-between mb-4">
           <div className="flex items-center gap-2">
             <div className="flex items-center gap-1">
-              <span className="text-sm font-medium text-gray-600">Match Score:</span>
+              <span className="text-sm font-medium text-gray-600">
+                Match Score:
+              </span>
               <div className="flex items-center gap-1">
                 {[...Array(5)].map((_, i) => (
                   <Star
                     key={i}
                     className={`w-4 h-4 ${
                       i < Math.round(product.confidence_score * 5)
-                        ? 'text-yellow-400 fill-current'
-                        : 'text-gray-300'
+                        ? "text-yellow-400 fill-current"
+                        : "text-gray-300"
                     }`}
                   />
                 ))}
