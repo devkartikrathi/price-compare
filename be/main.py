@@ -241,4 +241,4 @@ async def run_product_pipeline(product_query: str = "iPhone 16", max_products_pe
     return clean_data_for_json(final_result)
 
 if __name__ == "__main__":
-    print(asyncio.run(run_product_pipeline("iPhone 15 128GB", 2)))
+    print(asyncio.run(run_product_pipeline("iPhone 15 128GB", 3)))
