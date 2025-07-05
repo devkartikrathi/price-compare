@@ -53,147 +53,185 @@ class SmartPriceCalculator:
     
     def calculate_effective_prices(self, prepared_data: Dict, user_credit_cards: List[str]):
         prompt = f"""
-            You are an expert e-commerce pricing and credit card offer analyst. Your job is to analyze the following product data and return the most cost-effective purchasing options using the user's credit cards, including detailed credit card benefits and points calculations.
+        You are an expert e-commerce pricing and credit card offer analyst. Your job is to analyze the following product data and return the most cost-effective purchasing options using the user's credit cards, including detailed credit card benefits and points calculations.
 
-            ### USER CONTEXT
-            Search Query: "{prepared_data.get('query', '')}"
-            User Credit Cards: {user_credit_cards}
-            Total Products: {prepared_data.get('total_products', 0)}
+        ### USER CONTEXT
+        Search Query: "{prepared_data.get('query', '')}"
+        User Credit Cards: {user_credit_cards}
+        Total Products: {prepared_data.get('total_products', 0)}
 
-            ### PRODUCT DATA
-            {json.dumps(prepared_data, indent=2)}
+        ### PRODUCT DATA
+        {json.dumps(prepared_data, indent=2)}
 
-            ### CREDIT CARD DATABASE
-            Available Credit Cards and Their Benefits:
-            {json.dumps(self.credit_card_data, indent=2)}
+        ### CREDIT CARD DATABASE
+        Available Credit Cards and Their Benefits:
+        {json.dumps(self.credit_card_data, indent=2)}
 
-            ---
+        ---
 
-            ### OUTPUT FORMAT (MUST FOLLOW STRICTLY)
+        ### OUTPUT FORMAT (MUST FOLLOW STRICTLY)
 
-            Return an array of product objects in the following JSON format and make sure to arrange the products in the increasing order of effective price only and give higher priority to the products with same name as the search query also convert the \u20b9 to ₹:
+        Return an array of product objects in the following JSON format and make sure to arrange the products in the increasing order of effective price only and give higher priority to the products with same name as the search query also convert the \u20b9 to ₹:
 
-            [
-            {{
-                "product_title": string,
-                "product_url": string,
-                "platform": string,
-                "original_price": float,
-                "total_discount": float,
-                "effective_price": float,
-                "savings_percentage": float,
-                "recommended_card": string,
-                "card_benefit_description": string,
-                "credit_card_benefits": {{
-                    "reward_points_earned": float,
-                    "reward_points_value": float,
-                    "cashback_earned": float,
-                    "effective_cashback_rate": float,
-                    "annual_fee": string,
-                    "welcome_offer": string,
-                    "lounge_access": string,
-                    "other_benefits": string,
-                    "total_value_benefit": float
-                }},
-                "points_calculation_breakdown": string,
-                "confidence_score": float
+        [
+        {{
+            "product_title": string,
+            "product_url": string,
+            "platform": string,
+            "original_price": float,
+            "total_discount": float,
+            "effective_price": float,
+            "savings_percentage": float,
+            "recommended_card": string,
+            "card_benefit_description": string,
+            "credit_card_benefits": {{
+                "reward_points_earned": float,
+                "reward_points_value": float,
+                "cashback_earned": float,
+                "effective_cashback_rate": float,
+                "annual_fee": string,
+                "welcome_offer": string,
+                "lounge_access": string,
+                "other_benefits": string,
+                "total_value_benefit": float
             }},
-            ...
-            ]
+            "points_calculation_breakdown": string,
+            "confidence_score": float
+        }},
+        ...
+        ]
 
-            ---
+        ---
 
-            ### RULES FOR ANALYSIS
+        ### RULES FOR ANALYSIS
 
-            1. **Credit Card Matching Logic**
-            - Match user credit cards to the credit card database using:
-                - Case-insensitive exact card name match
-                - Partial bank name matches (e.g., "HDFC" → "HDFC Bank")
-                - Handle card aliases (e.g., "Flipkart Axis Bank" = "Axis Bank")
-            - Use the most beneficial applicable card for each product.
+        1. **Credit Card Matching Logic**
+        - **ONLY analyze credit cards that the user actually owns**: {user_credit_cards}
+        - Match user credit cards to the credit card database using:
+            - Case-insensitive exact card name match
+            - Partial bank name matches (e.g., "HDFC" → "HDFC Bank")
+            - Handle card aliases (e.g., "Flipkart Axis Bank" = "Axis Bank")
+        - **IMPORTANT**: Apply ALL applicable credit card benefits for each product, but ONLY for user's cards:
+            - Platform-specific benefits (e.g., Amazon Pay ICICI for Amazon purchases)
+            - Universal benefits (e.g., card's cashback on all purchases)
+            - Category-specific benefits (e.g., dining, fuel, online shopping)
+        - Use the most beneficial card from user's available cards for each product.
 
-            2. **Price Calculation**
-            - original_price = price_str and in case of flipkart special offer is already applied so don't apply it again rather use another offer as only flipkart allows one more offer to be applied on price_str excluding the special offer and in case of any other platform use price_str and just apply one best possible offer.
-            - total_discount = Total of valid applicable discounts (use max single if not combinable)
-            - effective_price = original_price - total_discount
-            - savings_percentage = (total_discount / original_price) * 100
+        2. **Price Calculation**
+        - original_price = price_str and in case of flipkart special offer is already applied so don't apply it again rather use another offer as only flipkart allows one more offer to be applied on price_str excluding the special offer and in case of any other platform use price_str and just apply one best possible offer.
+        - total_discount = Total of valid applicable discounts (use max single if not combinable) + credit card benefits
+        - effective_price = original_price - total_discount
+        - savings_percentage = (total_discount / original_price) * 100
 
-            3. **Credit Card Benefits Calculation**
-            - **reward_points_earned**: Calculate based on the card's reward structure (e.g., "4 Reward Points per ₹150 spent" means effective_price/150*4)
-            - **reward_points_value**: Monetary value of earned points (e.g., if 1 point = ₹0.25, then multiply points by 0.25)
-            - **cashback_earned**: Direct cashback amount based on card's cashback rate
-            - **effective_cashback_rate**: Total percentage benefit including points value and cashback
-            - **annual_fee**: From the card database
-            - **welcome_offer**: From the card database
-            - **lounge_access**: From the card database
-            - **other_benefits**: From the card database
-            - **total_value_benefit**: Sum of reward_points_value + cashback_earned
+        3. **Credit Card Benefits Calculation - USER CARDS ONLY**
+        - **For each product, analyze ONLY the user's available credit cards**: {user_credit_cards}
+        - **DO NOT recommend or calculate benefits for cards the user doesn't own**
+        - **reward_points_earned**: Calculate based on the user's card reward structure considering:
+            - Platform-specific rates (e.g., 5% on Amazon for Amazon Pay ICICI)
+            - Universal rates (e.g., 1% on all purchases for HDFC Millennia)
+            - Category-specific rates (e.g., 5X points on dining, 2X on online shopping)
+        - **reward_points_value**: Monetary value of earned points (e.g., if 1 point = ₹0.25, then multiply points by 0.25)
+        - **cashback_earned**: Direct cashback amount based on user's card cashback rate (consider both platform-specific and universal rates)
+        - **effective_cashback_rate**: Total percentage benefit including points value and cashback
+        - **annual_fee**: From the card database for user's card
+        - **welcome_offer**: From the card database for user's card
+        - **lounge_access**: From the card database for user's card
+        - **other_benefits**: From the card database for user's card
+        - **total_value_benefit**: Sum of reward_points_value + cashback_earned
 
-            4. **Points Calculation Breakdown**
-            - Provide a clear explanation of how points/cashback were calculated
-            - Example: "₹25,000 spent ÷ ₹150 × 4 points = 667 points worth ₹166.75 (₹0.25 per point)"
+        4. **User's Credit Card Benefits Application**
+        - **CRITICAL**: Only evaluate credit cards that the user actually owns: {user_credit_cards}
+        - **For each product, consider user's cards only**:
+            - If user has HDFC Millennia, apply its 1% cashback on all purchases to all platforms
+            - If user has Amazon Pay ICICI, apply its 5% cashback specifically to Amazon purchases
+            - If user has Axis Bank Flipkart, apply its benefits only if user actually owns this card
+        - **DO NOT apply benefits from cards the user doesn't own**
+        - **Choose the best card from user's available cards that provides maximum total benefit for each specific product**
 
-            5. **User Cards Analysis**
-            - **best_user_card**: The best card from user's available cards for this specific product
-            - **user_card_effective_price**: Final price using the best user card (original_price - user_card_total_discount)
-            - **user_card_total_discount**: Total discount achievable with user's best card
-            - **user_card_benefits**: Detailed benefits calculation for the user's best card
-            - **user_card_calculation_breakdown**: Clear explanation of user card calculations
-            - **savings_vs_recommended**: Difference between recommended card effective price and user card effective price (positive means user saves more with recommended card)
-            - **recommendation_message**: Advice on whether to use user's card or consider getting the recommended card
+        5. **Points Calculation Breakdown**
+        - Provide a clear explanation of how points/cashback were calculated using user's cards only
+        - Include both platform-specific and universal benefits in the breakdown for user's cards
+        - Example: "Using HDFC Millennia: 1% cashback on ₹60,000 = ₹600" or "Using Amazon Pay ICICI: 5% cashback on Amazon purchase ₹60,000 = ₹3,000 (capped at ₹1,800)"
 
-            6. **Recommendation Logic**
-            - Always analyze user's available cards first
-            - Calculate effective price with user's best card
-            - Compare with overall best card recommendation
-            - Provide clear guidance on the best option for the user
+        6. **User Cards Analysis**
+        - **best_user_card**: The best card from user's available cards for this specific product
+        - **user_card_effective_price**: Final price using the best user card (original_price - user_card_total_discount)
+        - **user_card_total_discount**: Total discount achievable with user's best card
+        - **user_card_benefits**: Detailed benefits calculation for the user's best card
+        - **user_card_calculation_breakdown**: Clear explanation of user card calculations
+        - **savings_vs_recommended**: Difference between recommended card effective price and user card effective price (positive means user saves more with recommended card)
+        - **recommendation_message**: Advice on whether to use user's card or consider getting the recommended card
 
-            7. **Recommendation Ranking**
-            - Give higher priority to products with same name as the search query
-            - Rank by lowest effective_price (Secondary)
-            - Consider total_value_benefit in recommendations
+        7. **Recommendation Logic**
+        - Always analyze user's available cards first
+        - Calculate effective price with user's best card
+        - Compare with overall best card recommendation
+        - Provide clear guidance on the best option for the user
 
-            8. **Credit Card Recommendation**
-            - Choose the best credit card for each product (considering both discounts and long-term benefits)
-            - Explain the benefit and how to apply it at checkout
+        8. **Recommendation Ranking**
+        - Give higher priority to products with same name as the search query
+        - Rank by lowest effective_price (Secondary)
+        - Consider total_value_benefit in recommendations
 
-            9. **Confidence Score**
-            - Float between 0.0 - 1.0 indicating analysis confidence
+        9. **Credit Card Recommendation**
+        - Choose the best credit card from user's available cards for each product considering applicable benefits (platform-specific + universal + category-specific)
+        - **recommended_card** should always be one of the user's cards: {user_credit_cards}
+        - Explain the benefit and how to apply it at checkout
 
-            ---
+        10. **Confidence Score**
+        - Float between 0.0 - 1.0 indicating analysis confidence
 
-            ### CALCULATION EXAMPLES
+        ---
 
-            **User Card vs Recommended Card Analysis:**
-            
-            **Scenario: User has HDFC Millennia, Recommended is Axis Magnus**
-            - Original Price: ₹50,000
-            - User Card (HDFC Millennia): 1% cashback = ₹500, Effective Price: ₹49,500
-            - Recommended Card (Axis Magnus): 12 EDGE Rewards per ₹200 = 3000 points worth ₹750, Effective Price: ₹49,250
-            - Savings vs Recommended: ₹250 (User could save ₹250 more with Magnus)
-            - Recommendation: "Consider applying for Axis Magnus for ₹250 additional savings"
+        ### CALCULATION EXAMPLES
 
-            **HDFC Millennia Example:**
-            - If spending ₹10,000 on Amazon (5% cashback category)
-            - Cashback: ₹10,000 × 0.05 = ₹500
-            - Plus 1000 Cash Points worth ₹250 (₹0.25 per point)
-            - Total benefit: ₹750
+        **User's Available Cards Analysis:**
+        - Product: iPhone 15 on Amazon for ₹60,000
+        - User Cards: ["HDFC Bank Millennia", "ICICI Bank Amazon Pay"]
+        - HDFC Millennia Analysis:
+            - Universal benefit: 1% cashback on all purchases = ₹600
+            - Total benefit: ₹600, Effective price: ₹59,400
+        - Amazon Pay ICICI Analysis:
+            - Platform-specific: 5% cashback on Amazon = ₹3,000 (capped at ₹1,800)
+            - Total benefit: ₹1,800, Effective price: ₹58,200
+        - **Result**: Amazon Pay ICICI is better for this Amazon purchase (from user's available cards)
 
-            **SBI Card ELITE Example:**
-            - If spending ₹15,000 on dining (5X points category)
-            - Points: ₹15,000 ÷ ₹100 × 5 = 750 points
-            - If 1 point = ₹0.25, value = ₹187.50
+        **Flipkart Purchase Example:**
+        - Product: iPhone 15 on Flipkart for ₹64,900
+        - User Cards: ["HDFC Bank Millennia", "ICICI Bank Amazon Pay"]
+        - HDFC Millennia Analysis:
+            - Universal benefit: 1% cashback on all purchases = ₹649
+            - Total benefit: ₹649, Effective price: ₹64,251
+        - Amazon Pay ICICI Analysis:
+            - Universal benefit: 1% cashback on all purchases = ₹649
+            - Total benefit: ₹649, Effective price: ₹64,251
+        - **Result**: Both cards provide same benefit, choose any (from user's available cards)
 
-            ---
+        **HDFC Millennia Example:**
+        - If spending ₹10,000 on any platform
+        - Universal cashback: ₹10,000 × 0.01 = ₹100
+        - Total benefit: ₹100
 
-            ### IMPORTANT NOTES
-            - All numbers must be realistic and valid (e.g., no negative prices)
-            - Always return a valid JSON structure (no markdown, no explanation, no extra text)
-            - Output only the JSON array in the exact schema above
-            - Calculate benefits accurately based on the credit card database provided
-            - Consider category-specific benefits (e.g., dining, online shopping, fuel)
-            - Factor in annual fees when recommending cards for long-term value
-            """
+        **Amazon Pay ICICI Example:**
+        - If spending ₹15,000 on Amazon (platform-specific benefit)
+        - Cashback: ₹15,000 × 0.05 = ₹750 (subject to monthly caps)
+        - If spending ₹15,000 on other platforms: 1% cashback = ₹150
+
+        ---
+
+        ### IMPORTANT NOTES
+        - **CRITICAL**: Only analyze and recommend credit cards that the user actually owns: {user_credit_cards}
+        - **DO NOT recommend cards the user doesn't have**
+        - **Universal benefits from user's cards apply to all platforms** - don't restrict cards to specific platforms only
+        - **Platform-specific benefits are bonuses on top of universal benefits where applicable**
+        - All numbers must be realistic and valid (e.g., no negative prices)
+        - Always return a valid JSON structure (no markdown, no explanation, no extra text)
+        - Output only the JSON array in the exact schema above
+        - Calculate benefits accurately based on the credit card database provided, but only for user's cards
+        - Consider category-specific benefits (e.g., dining, online shopping, fuel) for all platforms, but only for user's cards
+        - Factor in annual fees when recommending cards for long-term value
+        - **Ensure analysis is performed only for user's available credit cards**
+        """
 
         response = self.client.models.generate_content(
             model="gemini-2.0-flash",
@@ -221,7 +259,7 @@ async def analyze_product_prices(product_query: str, user_credit_cards: List[str
 if __name__ == "__main__":
     result = asyncio.run(analyze_product_prices(
         "iPhone 15 128GB", 
-        ["HDFC Bank Millennia"],
+        ["HDFC Bank Millennia", "ICICI Bank Amazon Pay"],
         cc_csv_path="CC.csv"
     ))
     print(json.dumps(result, indent=2))
